@@ -1,0 +1,12 @@
+# Ortam değişkenleri (Gizli anahtarlar)
+.env
+
+# Ham ve işlenmiş büyük veri dosyaları
+data/*
+!data/.gitkeep
+
+# Python sanal ortamı ve önbellek
+.venv/
+__pycache__/
+*.pyc
+.venv/
