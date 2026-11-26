@@ -75,7 +75,7 @@ def run_pipeline():
     print("--- Finansal Fiyat ETL Boru Hattı Başlatıldı ---")
     total_rows = 0
     for sym in SYMBOLS:
-        df = extract_and_transform(sym, period="1mo")
+        df = extract_and_transform(sym, period="1y")
         if not df.is_empty():
             load_to_postgres(df)
             total_rows += len(df)
