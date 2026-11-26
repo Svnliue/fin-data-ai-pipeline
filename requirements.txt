@@ -3,3 +3,4 @@ yfinance>=0.2.50
 psycopg[binary]>=3.2.10
 python-dotenv>=1.0.1
 pyarrow>=18.0.0
+sentence-transformers>=3.0.0
