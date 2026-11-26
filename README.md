@@ -1,6 +1,6 @@
-# End-to-End Financial Data & Hybrid RAG Pipeline
+# End-to-End Financial Data, Hybrid RAG & AI Signal Pipeline
 
-An end-to-end Data Engineering and AI Retrieval-Augmented Generation (RAG) pipeline that ingests historical stock market prices and financial news, transforms them using **Polars** and **HuggingFace Sentence-Transformers**, and stores both relational time-series data and 384-dimensional vector embeddings inside a single **PostgreSQL + pgvector** database.
+An end-to-end Data Engineering, Retrieval-Augmented Generation (RAG), and Quantitative Signal pipeline that ingests 1-year historical stock market prices and financial news, computes vectorized technical indicators (`SMA-20`, `SMA-50`, `RSI-14`) using **Polars**, runs financial sentiment classification via **ProsusAI/finbert**, and stores both time-series data and 384-dimensional vector embeddings inside **PostgreSQL + pgvector**.
 
 ---
 
@@ -9,7 +9,7 @@ An end-to-end Data Engineering and AI Retrieval-Augmented Generation (RAG) pipel
 ```text
 +-------------------+       +------------------------+       +-------------------------------+
 |   Yahoo Finance   | ----> |  Polars ETL Pipeline   | ----> |   PostgreSQL 16 + pgvector    |
-|  (Prices & News)  |       |  (src/fetch_prices.py) |       |  - market_prices (Time-Series)|
+| (1y Prices & News)|       |  (src/fetch_prices.py) |       |  - market_prices (Time-Series)|
 +-------------------+       +------------------------+       |  - market_news (vector(384) +   |
           |                                                  |    HNSW Cosine Index)         |
           |                 +------------------------+       +-------------------------------+
@@ -17,9 +17,10 @@ An end-to-end Data Engineering and AI Retrieval-Augmented Generation (RAG) pipel
                             | (all-MiniLM-L6-v2,     |                       |
                             |  src/fetch_news.py)    |                       v
                             +------------------------+       +-------------------------------+
-                                                             |   Hybrid RAG Query Engine     |
-                                                             |       (src/rag_query.py)      |
-                                                             |  SQL Analytics + Cosine Sim   |
+                                                             |   Hybrid RAG & Signal Engines |
+                                                             |  - src/rag_query.py (RAG)     |
+                                                             |  - src/signal_engine.py       |
+                                                             |    (Polars Tech + FinBERT)    |
                                                              +-------------------------------+
 ```
 
@@ -27,20 +28,22 @@ An end-to-end Data Engineering and AI Retrieval-Augmented Generation (RAG) pipel
 
 ## Key Engineering Highlights
 
-* **High-Performance ETL with Polars:** Uses vectorized transformations and strict schema casting for market OHLCV data.
+* **High-Performance ETL & Technical Indicators (Polars):** Ingests 1-year OHLCV history and computes vectorized rolling indicators (`SMA-20`, `SMA-50`, `RSI-14`) across multiple tickers using window expressions.
 * **Idempotent Data Ingestion:** Implements PostgreSQL `ON CONFLICT ... DO UPDATE` (UPSERT) constraints on `(symbol, price_date)` and `UNIQUE(url)` to guarantee zero duplicate records across repeated runs.
-* **Local AI Vectorization (Zero API Cost):** Generates normalized 384-dimensional embeddings in batch mode via `sentence-transformers/all-MiniLM-L6-v2` on PyTorch.
-* **Hybrid Retrieval (`pgvector` + SQL Window Functions):** Combines deterministic financial price metrics (`FIRST_VALUE`, period min/max, % return) with HNSW-indexed cosine similarity search (`1 - (embedding <=> query_vector)`).
-* **Containerized Infrastructure:** Reproducible PostgreSQL + `pgvector` environment provisioned via Docker Compose and automated `init.sql` schema migrations.
+* **Dual Local AI Models (Zero API Cost):**
+  * **Semantic Embeddings (`all-MiniLM-L6-v2`):** Generates normalized 384-dimensional news vectors stored with an HNSW cosine index in `pgvector`.
+  * **Financial Sentiment (`ProsusAI/finbert`):** Evaluates domain-specific positive/negative/neutral sentiment probabilities on financial news headlines and summaries.
+* **Hybrid Decision & RAG Engines:** Combines SQL window analytics and semantic search (`src/rag_query.py`) alongside a rule-based Technical + Sentiment scoring engine (`src/signal_engine.py`).
+* **Containerized Infrastructure:** Reproducible PostgreSQL 16 + `pgvector` environment provisioned via Docker Compose and automated `init.sql` schema migrations.
 
 ---
 
 ## Tech Stack
 
 * **Language:** Python 3.12+
-* **Data Processing:** Polars, PyArrow
+* **Data Processing & Indicators:** Polars, PyArrow
 * **Database & Vector Store:** PostgreSQL 16, `pgvector` (HNSW Index), `psycopg` (v3)
-* **AI / Embeddings:** PyTorch, HuggingFace `sentence-transformers` (`all-MiniLM-L6-v2`)
+* **AI / NLP Models:** PyTorch, HuggingFace `transformers` (`ProsusAI/finbert`), `sentence-transformers` (`all-MiniLM-L6-v2`)
 * **Infrastructure & Source:** Docker, Docker Compose, `yfinance`
 
 ---
@@ -66,7 +69,12 @@ python src/fetch_prices.py
 python src/fetch_news.py
 ```
 
-### 4. Query the Hybrid RAG Engine
+### 4. Run Hybrid RAG & AI Signal Engines
 ```bash
 python src/rag_query.py
+python src/signal_engine.py
 ```
+
+---
+
+> **Disclaimer:** This project is built strictly for educational, software architecture, and data engineering research purposes. Generated technical and sentiment signals do not constitute financial or investment advice.
