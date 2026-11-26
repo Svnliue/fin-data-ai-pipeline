@@ -5,6 +5,7 @@ from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from db import get_db_connection
 
 SYMBOLS = ["AAPL", "NVDA", "MSFT", "SAGT", "IREX"]
+BENCHMARK_SYMBOL = "QQQ"
 FINBERT_MODEL = "ProsusAI/finbert"
 PORTFOLIO_CAPITAL = 10000.0
 RISK_PER_TRADE = 0.01
@@ -28,8 +29,21 @@ def load_prices_df() -> pl.DataFrame:
     return pl.DataFrame(rows, schema=["symbol", "price_date", "high", "low", "close", "volume"], orient="row")
 
 
+def check_market_regime(df: pl.DataFrame) -> tuple[bool, float, float]:
+    qqq = df.filter(pl.col("symbol") == BENCHMARK_SYMBOL).sort("price_date")
+    if qqq.height < 200:
+        return True, 0.0, 0.0
+
+    qqq = qqq.with_columns(pl.col("close").rolling_mean(window_size=200).alias("sma_200"))
+    last_row = qqq.tail(1).to_dicts()[0]
+    close = last_row["close"]
+    sma200 = last_row["sma_200"]
+    is_bull = close >= sma200
+    return is_bull, round(close, 2), round(sma200, 2)
+
+
 def compute_technical_and_risk(df: pl.DataFrame) -> pl.DataFrame:
-    df = df.sort(["symbol", "price_date"])
+    df = df.filter(pl.col("symbol").is_in(SYMBOLS)).sort(["symbol", "price_date"])
 
     df = df.with_columns([
         pl.col("close").rolling_mean(window_size=20).over("symbol").alias("sma_20"),
@@ -97,7 +111,7 @@ def compute_finbert_sentiment() -> dict[str, tuple[float, int]]:
     }
 
 
-def generate_signal(row: dict, sentiment: float) -> tuple[str, float, list[str], dict]:
+def generate_signal(row: dict, sentiment: float, is_bull_regime: bool) -> tuple[str, float, list[str], dict]:
     close = row["close"]
     sma20 = row["sma_20"]
     sma50 = row["sma_50"]
@@ -144,15 +158,18 @@ def generate_signal(row: dict, sentiment: float) -> tuple[str, float, list[str],
         reasons.append(f"FinBERT nötr ({sentiment:+.2f})")
 
     if score >= 2.25:
-        decision = "GÜÇLÜ AL"
+        decision = "GÜÇLÜ AL" if is_bull_regime else "BEKLE (REJİM KİLİDİ)"
     elif score >= 0.75:
-        decision = "AL"
+        decision = "AL" if is_bull_regime else "BEKLE (REJİM KİLİDİ)"
     elif score <= -2.25:
         decision = "GÜÇLÜ SAT"
     elif score <= -0.75:
         decision = "SAT"
     else:
         decision = "BEKLE / TUT"
+
+    if not is_bull_regime and score >= 0.75:
+        reasons.append("QQQ < SMA200 Ayı Rejimi nedeniyle AL sinyali kilitlendi")
 
     stop_loss = max(0.01, close - (2.0 * atr))
     take_profit = close + (3.0 * atr)
@@ -173,17 +190,21 @@ def generate_signal(row: dict, sentiment: float) -> tuple[str, float, list[str],
 
 def main():
     prices_df = load_prices_df()
+    is_bull, qqq_close, qqq_sma200 = check_market_regime(prices_df)
     tech_df = compute_technical_and_risk(prices_df)
     sentiment_map = compute_finbert_sentiment()
 
+    regime_label = "BOĞA REJİMİ (AL Sinyalleri Açık)" if is_bull else "AYI REJİMİ (Yeni AL Sinyalleri Kilitli)"
+
     print("\n" + "=" * 80)
     print("HİBRİT TEKNİK + HACİM + FINBERT SİNYAL VE ATR RİSK YÖNETİMİ RAPORU")
+    print(f"MAKRO PİYASA REJİMİ [{BENCHMARK_SYMBOL}]: ${qqq_close:.2f} vs SMA-200 ${qqq_sma200:.2f} -> {regime_label}")
     print("=" * 80)
 
     for row in tech_df.iter_rows(named=True):
         sym = row["symbol"]
         sent_score, news_cnt = sentiment_map.get(sym, (0.0, 0))
-        decision, total_score, reasons, risk = generate_signal(row, sent_score)
+        decision, total_score, reasons, risk = generate_signal(row, sent_score, is_bull)
 
         print(f"\n[{sym}] KARAR: {decision} (Skor: {total_score:+.2f})")
         print(f"  - Fiyat: ${row['close']:.2f} | SMA-20: ${row['sma_20']:.2f} | SMA-50: ${row['sma_50']:.2f} | RSI-14: {row['rsi_14']:.1f}")

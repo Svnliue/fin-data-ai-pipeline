@@ -3,7 +3,7 @@ import polars as pl
 import yfinance as yf
 from db import get_db_connection
 
-SYMBOLS = ["AAPL", "NVDA", "MSFT", "SAGT", "IREX"]
+SYMBOLS = ["AAPL", "NVDA", "MSFT", "SAGT", "IREX", "QQQ"]
 
 def extract_and_transform(symbol: str, period: str = "1mo", retries: int = 3) -> pl.DataFrame:
     """Fetches historical OHLCV data with retry logic and cleans it using Polars."""
