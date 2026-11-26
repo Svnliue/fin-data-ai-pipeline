@@ -2,59 +2,47 @@ import time
 import polars as pl
 import yfinance as yf
 from db import get_db_connection
+from config import SYMBOLS, BENCHMARK_SYMBOL, PRICE_PERIOD
 
-SYMBOLS = ["AAPL", "NVDA", "MSFT", "SAGT", "IREX", "QQQ"]
+ALL_TICKERS = SYMBOLS + [BENCHMARK_SYMBOL]
 
-def extract_and_transform(symbol: str, period: str = "1mo", retries: int = 3) -> pl.DataFrame:
-    """Fetches historical OHLCV data with retry logic and cleans it using Polars."""
-    raw_pdf = None
-    for attempt in range(1, retries + 1):
+
+def fetch_with_retry(symbol: str, period: str, max_retries: int = 3) -> pl.DataFrame:
+    for attempt in range(1, max_retries + 1):
         try:
-            raw_pdf = yf.download(
-                symbol,
-                period=period,
-                progress=False,
-                auto_adjust=True,
-                timeout=30
-            )
-            if raw_pdf is not None and not raw_pdf.empty:
-                if getattr(raw_pdf.columns, "nlevels", 1) > 1:
-                    raw_pdf.columns = raw_pdf.columns.get_level_values(0)
-                break
-        except Exception as e:
-            print(f"[DENEME {attempt}/{retries}] {symbol} ağ hatası: {e}")
-        time.sleep(2)
+            ticker = yf.Ticker(symbol)
+            hist = ticker.history(period=period)
+            if hist.empty:
+                raise ValueError(f"{symbol} için boş veri döndü.")
 
-    if raw_pdf is None or raw_pdf.empty:
-        print(f"[UYARI] {symbol} için veri çekilemedi.")
-        return pl.DataFrame()
+            hist = hist.reset_index()
+            df = pl.from_pandas(hist).select([
+                pl.lit(symbol).alias("symbol"),
+                pl.col("Date").dt.date().alias("price_date"),
+                pl.col("Open").cast(pl.Float64).alias("open_price"),
+                pl.col("High").cast(pl.Float64).alias("high_price"),
+                pl.col("Low").cast(pl.Float64).alias("low_price"),
+                pl.col("Close").cast(pl.Float64).alias("close_price"),
+                pl.col("Volume").cast(pl.Int64).alias("volume"),
+            ]).drop_nulls()
+            return df
 
-    raw_pdf = raw_pdf.reset_index()
-    df = pl.from_pandas(raw_pdf)
+        except Exception as exc:
+            if attempt == max_retries:
+                raise RuntimeError(f"{symbol} {max_retries} denemede de çekilemedi: {exc}") from exc
+            wait_sec = 2 ** attempt
+            print(f"[UYARI] {symbol} bağlantı hatası (Deneme {attempt}/{max_retries}). {wait_sec} sn bekleniyor...")
+            time.sleep(wait_sec)
 
-    clean_df = (
-        df.select([
-            pl.lit(symbol).alias("symbol"),
-            pl.col("Date").dt.date().alias("price_date"),
-            pl.col("Open").cast(pl.Float64).round(4).alias("open_price"),
-            pl.col("High").cast(pl.Float64).round(4).alias("high_price"),
-            pl.col("Low").cast(pl.Float64).round(4).alias("low_price"),
-            pl.col("Close").cast(pl.Float64).round(4).alias("close_price"),
-            pl.col("Volume").cast(pl.Int64).alias("volume"),
-        ])
-        .drop_nulls(subset=["price_date", "close_price"])
-    )
-    return clean_df
+    return pl.DataFrame()
 
-def load_to_postgres(df: pl.DataFrame):
-    """Upserts transformed Polars DataFrame rows into PostgreSQL market_prices."""
+
+def upsert_prices(df: pl.DataFrame) -> int:
     if df.is_empty():
-        return
+        return 0
 
-    upsert_query = """
-        INSERT INTO market_prices (
-            symbol, price_date, open_price, high_price, low_price, close_price, volume
-        )
+    query = """
+        INSERT INTO market_prices (symbol, price_date, open_price, high_price, low_price, close_price, volume)
         VALUES (%s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (symbol, price_date)
         DO UPDATE SET
@@ -64,24 +52,26 @@ def load_to_postgres(df: pl.DataFrame):
             close_price = EXCLUDED.close_price,
             volume = EXCLUDED.volume;
     """
-
     rows = df.rows()
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.executemany(upsert_query, rows)
+            cur.executemany(query, rows)
         conn.commit()
+    return len(rows)
 
-def run_pipeline():
-    print("--- Finansal Fiyat ETL Boru Hattı Başlatıldı ---")
-    total_rows = 0
-    for sym in SYMBOLS:
-        df = extract_and_transform(sym, period="1y")
-        if not df.is_empty():
-            load_to_postgres(df)
-            total_rows += len(df)
-            print(f"[BAŞARILI] {sym}: {len(df)} günlük veri Polars ile işlendi ve DB'ye yazıldı.")
-        time.sleep(1)
-    print(f"--- Tamamlandı: Toplam {total_rows} kayıt işlendi ---")
+
+def main():
+    print("--- Finansal Fiyat ETL Boru Hattı Başlatıldı (Retry + Merkezi Config) ---")
+    total_records = 0
+
+    for sym in ALL_TICKERS:
+        df = fetch_with_retry(sym, PRICE_PERIOD)
+        inserted = upsert_prices(df)
+        total_records += inserted
+        print(f"[BAŞARILI] {sym}: {inserted} günlük veri Polars ile işlendi ve DB'ye yazıldı.")
+
+    print(f"--- Tamamlandı: Toplam {total_records} kayıt işlendi ---")
+
 
 if __name__ == "__main__":
-    run_pipeline()
+    main()

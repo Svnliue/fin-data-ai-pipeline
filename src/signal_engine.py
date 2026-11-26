@@ -2,12 +2,14 @@ import polars as pl
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from db import get_db_connection
-
-SYMBOLS = ["AAPL", "NVDA", "MSFT", "SAGT", "IREX"]
-BENCHMARK_SYMBOL = "QQQ"
-FINBERT_MODEL = "ProsusAI/finbert"
-PORTFOLIO_CAPITAL = 10000.0
-RISK_PER_TRADE = 0.01
+from config import (
+    SYMBOLS,
+    BENCHMARK_SYMBOL,
+    FINBERT_MODEL,
+    PORTFOLIO_CAPITAL,
+    RISK_PER_TRADE,
+    MAX_POSITION_PCT,
+)
 
 
 def load_prices_df() -> pl.DataFrame:
@@ -175,7 +177,6 @@ def generate_signal(row: dict, sentiment: float, is_macro_bull: bool) -> tuple[s
     else:
         reasons.append(f"FinBERT nötr ({sentiment:+.2f})")
 
-    # KATMAN 1: SERT GÜVENLİK KİLİTLERİ (VETO)
     hard_lock_reasons = []
     if not is_macro_bull:
         hard_lock_reasons.append("QQQ < SMA200 Makro Ayı Rejimi")
@@ -196,8 +197,11 @@ def generate_signal(row: dict, sentiment: float, is_macro_bull: bool) -> tuple[s
     stop_loss = max(0.01, close - (2.0 * atr))
     take_profit = close + (3.0 * atr)
     risk_per_share = max(0.01, close - stop_loss)
+
     max_risk_usd = PORTFOLIO_CAPITAL * RISK_PER_TRADE
-    suggested_shares = int(max_risk_usd // risk_per_share)
+    risk_based_shares = int(max_risk_usd // risk_per_share)
+    cap_based_shares = int((PORTFOLIO_CAPITAL * MAX_POSITION_PCT) // max(0.01, close))
+    suggested_shares = min(risk_based_shares, cap_based_shares)
 
     risk_plan = {
         "sma_200": round(sma200, 2) if sma200 else 0.0,
@@ -209,6 +213,25 @@ def generate_signal(row: dict, sentiment: float, is_macro_bull: bool) -> tuple[s
     }
 
     return decision, round(score, 2), reasons, risk_plan
+
+
+def persist_signal(symbol: str, decision: str, score: float, close: float, risk: dict, sentiment: float) -> None:
+    query = """
+        INSERT INTO signal_history (symbol, signal_date, decision, confidence_score, close_price, stop_loss, take_profit, finbert_score)
+        VALUES (%s, CURRENT_DATE, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (symbol, signal_date)
+        DO UPDATE SET
+            decision = EXCLUDED.decision,
+            confidence_score = EXCLUDED.confidence_score,
+            close_price = EXCLUDED.close_price,
+            stop_loss = EXCLUDED.stop_loss,
+            take_profit = EXCLUDED.take_profit,
+            finbert_score = EXCLUDED.finbert_score;
+    """
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (symbol, decision, score, close, risk["stop_loss"], risk["take_profit"], sentiment))
+        conn.commit()
 
 
 def main():
@@ -228,14 +251,16 @@ def main():
         sym = row["symbol"]
         sent_score, _ = sentiment_map.get(sym, (0.0, 0))
         decision, total_score, reasons, risk = generate_signal(row, sent_score, is_macro_bull)
+        persist_signal(sym, decision, total_score, row["close"], risk, sent_score)
 
         print(f"\n[{sym}] KARAR: {decision} (Güven Skoru: {total_score:+.2f})")
         print(f"  - Fiyat: ${row['close']:.2f} | SMA-50: ${row['sma_50']:.2f} | SMA-200: ${risk['sma_200']:.2f} | RSI-14: {row['rsi_14']:.1f}")
         print(f"  - ATR-14: ${risk['atr']:.2f} | Zarar-Kes (SL): ${risk['stop_loss']:.2f} | Kâr-Al (TP): ${risk['take_profit']:.2f}")
-        print(f"  - Pozisyon Planı ($10k kasa, %1 risk): {risk['shares']} adet (~${risk['position_usd']:.2f})")
+        print(f"  - Pozisyon Planı ($10k kasa, %1 risk, %25 tavan): {risk['shares']} adet (~${risk['position_usd']:.2f})")
         print(f"  - Katman-2 Puan Detayı: {' | '.join(reasons)}")
 
-    print("\n" + "=" * 84)
+    print("\n[DB] Tüm sinyaller PostgreSQL signal_history tablosuna kaydedildi.")
+    print("=" * 84)
 
 
 if __name__ == "__main__":
