@@ -1,146 +1,69 @@
-import time
 from datetime import datetime, timezone
-from sentence_transformers import SentenceTransformer
 import yfinance as yf
+from sentence_transformers import SentenceTransformer
 from db import get_db_connection
-
-SYMBOLS = ["AAPL", "NVDA", "MSFT", "SAGT", "IREX"]
-EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
+from config import SYMBOLS, EMBEDDING_MODEL
 
 
-def parse_yahoo_news(symbol: str, raw_news: list[dict]) -> list[dict]:
-    """Yahoo Finance'in farklı JSON versiyonlarını standart şemaya oturtur."""
-    parsed_items = []
+def fetch_and_embed_news(model: SentenceTransformer, symbol: str) -> int:
+    ticker = yf.Ticker(symbol)
+    raw_news = ticker.news or []
+    if not raw_news:
+        return 0
 
+    records = []
     for item in raw_news:
-        # Güncel yfinance sürümlerinde veriler 'content' sözlüğü içinde gelir
-        data = item.get("content", item)
+        content_obj = item.get("content", item)
+        title = content_obj.get("title") or ""
+        summary = content_obj.get("summary") or content_obj.get("description") or title
 
-        title = data.get("title")
-        summary = data.get("summary") or data.get("description") or title
+        canonical = content_obj.get("canonicalUrl") or {}
+        url = canonical.get("url") if isinstance(canonical, dict) else (content_obj.get("link") or "")
 
-        # URL çıkarımı
-        url = None
-        if isinstance(data.get("canonicalUrl"), dict):
-            url = data["canonicalUrl"].get("url")
-        elif isinstance(data.get("clickThroughUrl"), dict):
-            url = data["clickThroughUrl"].get("url")
-        else:
-            url = data.get("link") or data.get("url")
-
-        # Kaynak (Publisher) çıkarımı
-        provider = data.get("provider")
-        if isinstance(provider, dict):
-            source = provider.get("displayName", "Yahoo Finance")
-        else:
-            source = data.get("publisher") or "Yahoo Finance"
-
-        # Yayınlanma tarihi çıkarımı (ISO string veya Unix timestamp)
-        pub_raw = data.get("pubDate") or data.get("providerPublishTime")
+        pub_date_raw = content_obj.get("pubDate")
         published_at = None
-        if isinstance(pub_raw, str):
+        if isinstance(pub_date_raw, str):
             try:
-                published_at = datetime.fromisoformat(pub_raw.replace("Z", "+00:00"))
+                published_at = datetime.fromisoformat(pub_date_raw.replace("Z", "+00:00"))
             except ValueError:
                 published_at = datetime.now(timezone.utc)
-        elif isinstance(pub_raw, (int, float)):
-            published_at = datetime.fromtimestamp(pub_raw, tz=timezone.utc)
-        else:
-            published_at = datetime.now(timezone.utc)
 
-        # Başlık veya URL yoksa bozuk kaydı ele
         if not title or not url:
             continue
 
-        parsed_items.append({
-            "symbol": symbol,
-            "title": title.strip(),
-            "content": summary.strip(),
-            "source": str(source)[:100],
-            "url": url.strip(),
-            "published_at": published_at,
-        })
+        text_to_embed = f"{title}. {summary}"
+        vec = model.encode(text_to_embed, normalize_embeddings=True).tolist()
+        vec_str = "[" + ",".join(f"{x:.6f}" for x in vec) + "]"
+        records.append((symbol, title, summary, url, published_at, vec_str))
 
-    return parsed_items
-
-
-def fetch_and_embed_news(model: SentenceTransformer, symbol: str) -> list[tuple]:
-    """Bir hissenin haberlerini çeker ve 384 boyutlu AI vektörlerini üretir."""
-    ticker = yf.Ticker(symbol)
-    raw_news = ticker.news or []
-    cleaned_news = parse_yahoo_news(symbol, raw_news)
-
-    if not cleaned_news:
-        return []
-
-    # Başlık ve içeriği birleştirerek yapay zekaya zengin bağlam veriyoruz
-    texts_to_embed = [
-        f"{item['symbol']} | {item['title']}: {item['content']}"
-        for item in cleaned_news
-    ]
-
-    # Toplu (batch) vektör üretimi — tek tek üretmekten kat kat hızlıdır
-    vectors = model.encode(texts_to_embed, normalize_embeddings=True)
-
-    rows = []
-    for item, vec in zip(cleaned_news, vectors):
-        # pgvector formatı için listeyi '[0.12, -0.04, ...]' stringine çeviriyoruz
-        vec_str = "[" + ",".join(f"{x:.6f}" for x in vec.tolist()) + "]"
-        rows.append((
-            item["symbol"],
-            item["title"],
-            item["content"],
-            item["source"],
-            item["url"],
-            item["published_at"],
-            vec_str,
-        ))
-
-    return rows
-
-
-def load_news_to_postgres(rows: list[tuple]) -> int:
-    """Haberleri ve vektörleri idempotent şekilde PostgreSQL'e yazar."""
-    if not rows:
+    if not records:
         return 0
 
-    upsert_query = """
-        INSERT INTO market_news (symbol, title, content, source, url, published_at, embedding)
-        VALUES (%s, %s, %s, %s, %s, %s, %s::vector)
-        ON CONFLICT (url)
-        DO UPDATE SET
-            title = EXCLUDED.title,
-            content = EXCLUDED.content,
-            embedding = EXCLUDED.embedding;
+    query = """
+        INSERT INTO market_news (symbol, title, content, url, published_at, embedding)
+        VALUES (%s, %s, %s, %s, %s, %s::vector)
+        ON CONFLICT (url) DO NOTHING;
     """
-
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.executemany(upsert_query, rows)
+            cur.executemany(query, records)
         conn.commit()
 
-    return len(rows)
+    return len(records)
 
 
-def run_news_pipeline():
-    print(f"--- AI Haber & Vektör Boru Hattı Başlatıldı ({EMBEDDING_MODEL_NAME}) ---")
-    # Modeli döngü dışında SADECE 1 KEZ yüklüyoruz
-    model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+def main():
+    print(f"--- AI Haber & Vektör Boru Hattı Başlatıldı ({EMBEDDING_MODEL}) ---")
+    model = SentenceTransformer(EMBEDDING_MODEL)
+    total = 0
 
-    total_processed = 0
-    for symbol in SYMBOLS:
-        try:
-            rows = fetch_and_embed_news(model, symbol)
-            count = load_news_to_postgres(rows)
-            total_processed += count
-            print(f"[BAŞARILI] {symbol}: {count} haber vektörleştirildi ve DB'ye yazıldı.")
-        except Exception as exc:
-            print(f"[HATA] {symbol} haberleri işlenemedi: {exc}")
+    for sym in SYMBOLS:
+        count = fetch_and_embed_news(model, sym)
+        total += count
+        print(f"[BAŞARILI] {sym}: {count} haber vektörleştirildi ve DB'ye yazıldı.")
 
-        time.sleep(1.5)
-
-    print(f"--- Tamamlandı: Toplam {total_processed} haber vektörü işlendi ---")
+    print(f"--- Tamamlandı: Toplam {total} haber vektörü işlendi ---")
 
 
 if __name__ == "__main__":
-    run_news_pipeline()
+    main()

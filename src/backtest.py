@@ -1,10 +1,6 @@
 import polars as pl
 from db import get_db_connection
-
-SYMBOLS = ["AAPL", "NVDA", "MSFT", "SAGT", "IREX"]
-BENCHMARK_SYMBOL = "QQQ"
-INITIAL_CAPITAL = 10000.0
-COMMISSION_RATE = 0.001
+from config import SYMBOLS, BENCHMARK_SYMBOL, PORTFOLIO_CAPITAL, COMMISSION_RATE
 
 
 def build_regime_map(df: pl.DataFrame) -> pl.DataFrame:
@@ -40,8 +36,8 @@ def run_backtest_for_symbol(df: pl.DataFrame, regime_df: pl.DataFrame, symbol: s
         pl.col("tr").rolling_mean(14).alias("atr_14"),
     ])
 
-    capital = INITIAL_CAPITAL
-    peak_equity = INITIAL_CAPITAL
+    capital = PORTFOLIO_CAPITAL
+    peak_equity = PORTFOLIO_CAPITAL
     max_drawdown_pct = 0.0
 
     in_position = False
@@ -116,7 +112,7 @@ def run_backtest_for_symbol(df: pl.DataFrame, regime_df: pl.DataFrame, symbol: s
     gross_profit = sum(wins)
     gross_loss = sum(losses)
     profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (99.9 if gross_profit > 0 else 0.0)
-    total_return = ((capital - INITIAL_CAPITAL) / INITIAL_CAPITAL) * 100.0
+    total_return = ((capital - PORTFOLIO_CAPITAL) / PORTFOLIO_CAPITAL) * 100.0
 
     return {
         "symbol": symbol,
@@ -149,10 +145,10 @@ def main():
     regime_df = build_regime_map(df)
 
     print("=" * 98)
-    print("KURUMSAL BACKTEST KARNESİ [KATMAN-1: QQQ & HİSSE SMA-200 KİLİTLİ] ($10,000 | %0.1 Komisyon)")
+    print(f"KURUMSAL BACKTEST KARNESİ [KATMAN-1: {BENCHMARK_SYMBOL} & HİSSE SMA-200 KİLİTLİ] (${PORTFOLIO_CAPITAL:,.0f} | %{COMMISSION_RATE*100:.1f} Komisyon)")
     print("=" * 98)
 
-    total_start = INITIAL_CAPITAL * len(SYMBOLS)
+    total_start = PORTFOLIO_CAPITAL * len(SYMBOLS)
     total_end = 0.0
 
     for sym in SYMBOLS:
