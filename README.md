@@ -1,6 +1,6 @@
 # End-to-End Financial Data, Hybrid RAG & Autonomous Quantitative Pipeline
 
-An end-to-end Data Engineering, Retrieval-Augmented Generation (RAG), and Quantitative Research pipeline that ingests 1-year historical stock market prices and financial news, computes vectorized technical and volatility indicators (`SMA-20`, `SMA-50`, `SMA-200`, `RSI-14`, `ATR-14`, `Volume Ratio`) using **Polars**, runs domain-specific financial sentiment classification via **ProsusAI/finbert**, enforces a **QQQ SMA-200 Macro Market Regime Lock**, and validates rules through a commission-adjusted **Walk-Forward Backtest Engine** backed by **PostgreSQL + pgvector**.
+An end-to-end Data Engineering, Retrieval-Augmented Generation (RAG), and Quantitative Research pipeline that ingests 1-year historical stock market prices and financial news, computes vectorized technical, volatility, and relative strength indicators (`SMA-20`, `SMA-50`, `SMA-200`, `RSI-14`, `ATR-14`, `Volume Ratio`, `20d RS vs. QQQ`) using **Polars**, runs domain-specific financial sentiment classification via **ProsusAI/finbert**, enforces a **Two-Tier Institutional Risk & Regime Architecture**, and validates rules through a commission-adjusted **Walk-Forward Backtest Engine** backed by **PostgreSQL + pgvector**.
 
 ---
 
@@ -18,12 +18,12 @@ An end-to-end Data Engineering, Retrieval-Augmented Generation (RAG), and Quanti
 | 1. Polars ETL      |            | 2. AI Vector ETL   |            | 3. Quant & AI Engines  |
 | (fetch_prices.py)  |            | (fetch_news.py)    |            | - rag_query.py         |
 | 1y OHLCV + QQQ     |            | all-MiniLM-L6-v2   |            | - signal_engine.py     |
-+--------------------+            +--------------------+            |   (QQQ SMA-200 Regime +|
-        |                                   |                       |    FinBERT + ATR Risk) |
-        +-----------------+-----------------+                       | - backtest.py (1y Sim) |
-                          v                                         +------------------------+
-          +-------------------------------+                                     ^
-          |   PostgreSQL 16 + pgvector    | ------------------------------------+
++--------------------+            +--------------------+            |   (Tier-1 SMA-200 Gates|
+        |                                   |                       |   +Tier-2 Multi-Factor)|
+        +-----------------+-----------------+                       | - backtest.py (MaxDD & |
+                          v                                         |   Profit Factor Scorecard|
+          +-------------------------------+                         +------------------------+
+          |   PostgreSQL 16 + pgvector    | <-----------------------------------+
           | - market_prices (Time-Series) |
           | - market_news (vector(384) +  |
           |   HNSW Cosine Index)          |
@@ -34,15 +34,13 @@ An end-to-end Data Engineering, Retrieval-Augmented Generation (RAG), and Quanti
 
 ## Key Engineering Highlights
 
-* **Single-Command Autonomous Orchestration (`src/run_pipeline.py`):** Executes the full 4-stage pipeline (Market ETL -> Vector Embeddings -> Macro/Signal/Risk Engine -> Walk-Forward Backtest) with step-level latency telemetry and fail-fast exit handling.
-* **Macro Market Regime Filter (`QQQ` vs `SMA-200`):** Evaluates benchmark index (`QQQ`) trend before authorizing long signals; automatically locks new `BUY` entries (`BEKLE / REGIME LOCK`) during bear regimes (`QQQ < SMA-200`) to preserve capital.
-* **High-Performance ETL & Vectorized Indicators (Polars):** Ingests 1-year OHLCV market history across equities, leveraged ETFs, and benchmark indices, computing rolling indicators (`SMA-20`, `SMA-50`, `RSI-14`, `ATR-14`, and 20-day `Volume Ratio`).
-* **Idempotent Data Ingestion:** Enforces PostgreSQL `ON CONFLICT ... DO UPDATE` (UPSERT) constraints on `(symbol, price_date)` and `UNIQUE(url)` to guarantee zero duplicate records across repeated runs.
-* **Dual Local AI Models (Zero API Cost):**
-  * **Semantic Embeddings (`all-MiniLM-L6-v2`):** Generates normalized 384-dimensional news vectors indexed with HNSW cosine similarity in `pgvector`.
-  * **Financial Sentiment (`ProsusAI/finbert`):** Computes domain-specific positive/negative/neutral sentiment probabilities on financial news titles and summaries.
-* **ATR Dynamic Risk Management & Walk-Forward Backtest:** Calculates volatility-adjusted Stop-Loss (`2 x ATR-14`), Take-Profit (`3 x ATR-14`, `1:1.5` Risk/Reward), fixed-fractional position sizing (`1%` max risk per trade), and commission-adjusted (`0.1%`) 1-year historical simulation (`src/backtest.py`).
-* **Containerized Infrastructure:** Reproducible PostgreSQL 16 + `pgvector` environment provisioned via Docker Compose and automated `init.sql` schema migrations.
+* **Two-Tier Institutional Decision Architecture (`src/signal_engine.py`):**
+  * **Tier-1 Hard Safety Gates (Veto Layer):** Blocks new `BUY` signals automatically unless both the macro benchmark (`QQQ >= SMA-200`) and the individual equity (`Close >= SMA-200`) trade in long-term bull regimes.
+  * **Tier-2 Multi-Factor Scoring:** Combines trend alignment (`SMA-20 > SMA-50`), 20-day Relative Strength outperformance vs. `QQQ`, volume confirmation (`>= 1.2x` 20d avg), RSI balance, and **ProsusAI/finbert** financial news sentiment into a composite confidence score.
+* **Institutional Backtest Scorecard (`src/backtest.py`):** Evaluates 1-year walk-forward performance with `0.1%` commission/slippage, reporting trade count, blocked regime entries, Win Rate, **Max Drawdown (`MaxDD %`)**, and **Profit Factor (`Gross Profit / Gross Loss`)**.
+* **ATR Dynamic Risk Management & Position Sizing:** Calculates volatility-adjusted Stop-Loss (`2 x ATR-14`), Take-Profit (`3 x ATR-14`, `1:1.5` Risk/Reward), and fixed-fractional position sizing (`1%` max portfolio risk per trade).
+* **Single-Command Autonomous Orchestration (`src/run_pipeline.py`):** Executes the full 4-stage pipeline (Market ETL -> Vector Embeddings -> Two-Tier Signal/Risk Engine -> Walk-Forward Backtest) with step-level latency telemetry and fail-fast exit handling.
+* **Idempotent Data Ingestion & Local AI Models:** Enforces PostgreSQL `ON CONFLICT ... DO UPDATE` (UPSERT) constraints and runs `all-MiniLM-L6-v2` (384-dim `pgvector` HNSW index) alongside `ProsusAI/finbert` locally with zero external API costs.
 
 ---
 
