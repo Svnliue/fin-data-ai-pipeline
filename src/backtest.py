@@ -6,6 +6,8 @@ from config import (
     BENCHMARK_SYMBOL,
     PORTFOLIO_CAPITAL,
     COMMISSION_RATE,
+    MAX_POSITION_PCT,
+    MAX_OPEN_POSITIONS,
 )
 
 log = get_logger("backtest")
@@ -24,25 +26,28 @@ def build_regime_map(df: pl.DataFrame) -> pl.DataFrame:
     return qqq.select(["price_date", "is_macro_bull"])
 
 
-def run_backtest_for_symbol(df: pl.DataFrame, regime_df: pl.DataFrame, symbol: str) -> dict:
-    sub = df.filter(pl.col("symbol") == symbol).sort("price_date")
+def prepare_features(df: pl.DataFrame, regime_df: pl.DataFrame) -> pl.DataFrame:
+    sub = df.filter(pl.col("symbol").is_in(SYMBOLS)).sort(["symbol", "price_date"])
     sub = sub.join(regime_df, on="price_date", how="left").with_columns(
         pl.col("is_macro_bull").fill_null(True)
     )
-
-    sub = sub.with_columns([
-        pl.col("close").rolling_mean(20).alias("sma_20"),
-        pl.col("close").rolling_mean(50).alias("sma_50"),
-        pl.col("close").rolling_mean(200).alias("sma_200"),
-        pl.col("volume").rolling_mean(20).alias("vol_sma_20"),
+    return sub.with_columns([
+        pl.col("close").rolling_mean(20).over("symbol").alias("sma_20"),
+        pl.col("close").rolling_mean(50).over("symbol").alias("sma_50"),
+        pl.col("close").rolling_mean(200).over("symbol").alias("sma_200"),
+        pl.col("volume").rolling_mean(20).over("symbol").alias("vol_sma_20"),
         pl.max_horizontal([
             pl.col("high") - pl.col("low"),
-            (pl.col("high") - pl.col("close").shift(1)).abs(),
-            (pl.col("low") - pl.col("close").shift(1)).abs(),
+            (pl.col("high") - pl.col("close").shift(1).over("symbol")).abs(),
+            (pl.col("low") - pl.col("close").shift(1).over("symbol")).abs(),
         ]).alias("tr"),
     ]).with_columns([
-        pl.col("tr").rolling_mean(14).alias("atr_14"),
+        pl.col("tr").rolling_mean(14).over("symbol").alias("atr_14"),
     ])
+
+
+def run_backtest_for_symbol(feat_df: pl.DataFrame, symbol: str) -> dict:
+    sub = feat_df.filter(pl.col("symbol") == symbol).sort("price_date")
 
     capital = PORTFOLIO_CAPITAL
     peak_equity = PORTFOLIO_CAPITAL
@@ -134,6 +139,87 @@ def run_backtest_for_symbol(df: pl.DataFrame, regime_df: pl.DataFrame, symbol: s
     }
 
 
+def run_shared_portfolio_backtest(feat_df: pl.DataFrame) -> dict:
+    total_start = PORTFOLIO_CAPITAL * len(SYMBOLS)
+    cash = total_start
+    peak_equity = total_start
+    max_dd_pct = 0.0
+    positions: dict[str, dict] = {}
+    blocked_by_slot_limit = 0
+    total_trades = 0
+
+    dates = sorted(feat_df["price_date"].unique().to_list())
+    rows_by_date: dict[object, list[dict]] = {d: [] for d in dates}
+    for r in feat_df.iter_rows(named=True):
+        rows_by_date[r["price_date"]].append(r)
+
+    for d in dates:
+        day_rows = rows_by_date[d]
+        last_prices = {r["symbol"]: r["close"] for r in day_rows}
+
+        # 1. Acik pozisyon cikislari
+        for r in day_rows:
+            sym = r["symbol"]
+            if sym not in positions or r["sma_50"] is None:
+                continue
+            pos = positions[sym]
+            exit_price = None
+            if r["low"] <= pos["sl"]:
+                exit_price = pos["sl"]
+            elif r["high"] >= pos["tp"]:
+                exit_price = pos["tp"]
+            elif r["close"] < r["sma_20"]:
+                exit_price = r["close"]
+
+            if exit_price is not None:
+                cash += pos["shares"] * exit_price * (1.0 - COMMISSION_RATE)
+                del positions[sym]
+                total_trades += 1
+
+        # 2. Yeni girisler (Max 3 eszamanli pozisyon + %25 tavan)
+        for r in day_rows:
+            sym = r["symbol"]
+            if sym in positions or r["sma_50"] is None or r["atr_14"] is None:
+                continue
+            trend_up = r["close"] > r["sma_20"] > r["sma_50"]
+            vol_ok = r["volume"] >= (r["vol_sma_20"] or 0) * 1.1
+            stock_bull = (r["close"] >= r["sma_200"]) if r["sma_200"] is not None else True
+
+            if trend_up and vol_ok and r["is_macro_bull"] and stock_bull:
+                if len(positions) >= MAX_OPEN_POSITIONS:
+                    blocked_by_slot_limit += 1
+                    continue
+
+                equity_now = cash + sum(p["shares"] * last_prices.get(s, p["entry"]) for s, p in positions.items())
+                alloc = min(cash, equity_now * MAX_POSITION_PCT)
+                if alloc > 100.0:
+                    shares = (alloc * (1.0 - COMMISSION_RATE)) / r["close"]
+                    cash -= alloc
+                    positions[sym] = {
+                        "shares": shares,
+                        "entry": r["close"],
+                        "sl": max(0.01, r["close"] - 2.0 * r["atr_14"]),
+                        "tp": r["close"] + 3.0 * r["atr_14"],
+                    }
+
+        equity_eod = cash + sum(p["shares"] * last_prices.get(s, p["entry"]) for s, p in positions.items())
+        if equity_eod > peak_equity:
+            peak_equity = equity_eod
+        dd = ((peak_equity - equity_eod) / peak_equity) * 100.0
+        if dd > max_dd_pct:
+            max_dd_pct = dd
+
+    final_equity = cash + sum(p["shares"] * last_prices.get(s, p["entry"]) for s, p in positions.items())
+    return {
+        "start": total_start,
+        "end": round(final_equity, 2),
+        "return_pct": round(((final_equity - total_start) / total_start) * 100.0, 2),
+        "max_dd": round(max_dd_pct, 2),
+        "trades": total_trades,
+        "slot_blocked": blocked_by_slot_limit,
+    }
+
+
 def main():
     query = """
         SELECT symbol, price_date,
@@ -151,17 +237,14 @@ def main():
 
     df = pl.DataFrame(rows, schema=["symbol", "price_date", "high", "low", "close", "volume"], orient="row")
     regime_df = build_regime_map(df)
+    feat_df = prepare_features(df, regime_df)
 
     print("=" * 98)
     print(f"KURUMSAL BACKTEST KARNESİ [2x SL / 3x TP + ÇİFT SMA-200 KİLİT] (${PORTFOLIO_CAPITAL:,.0f} | %{COMMISSION_RATE*100:.1f} Komisyon)")
     print("=" * 98)
 
-    total_start = PORTFOLIO_CAPITAL * len(SYMBOLS)
-    total_end = 0.0
-
     for sym in SYMBOLS:
-        res = run_backtest_for_symbol(df, regime_df, sym)
-        total_end += res["final_capital"]
+        res = run_backtest_for_symbol(feat_df, sym)
         log.info(f"[{sym}] Return={res['return_pct']:+.2f}% | MaxDD={res['max_dd']:.2f}% | PF={res['profit_factor']:.2f}")
         print(
             f"[{res['symbol']:4s}] İşlem: {res['trades']:2d} (Kilitlenen: {res['blocked']:2d}) | "
@@ -171,9 +254,14 @@ def main():
             f"Bakiye: ${res['final_capital']:9.2f} ({res['return_pct']:+6.2f}%)"
         )
 
-    total_ret = ((total_end - total_start) / total_start) * 100.0
+    shared = run_shared_portfolio_backtest(feat_df)
+    log.info(f"[SHARED_PORTFOLIO] End=${shared['end']} ({shared['return_pct']:+.2f}%) | MaxDD={shared['max_dd']:.2f}%")
     print("-" * 98)
-    print(f"PORTFÖY TOPLAMI: ${total_start:,.2f} -> ${total_end:,.2f} (Net Değişim: {total_ret:+.2f}%)")
+    print(
+        f"ORTAK PORTFÖY HAVUZU (Max {MAX_OPEN_POSITIONS} Pozisyon, %25 Tavan): "
+        f"${shared['start']:,.2f} -> ${shared['end']:,.2f} ({shared['return_pct']:+.2f}%) | "
+        f"MaxDD: %{shared['max_dd']:.2f} | Slot Engeli: {shared['slot_blocked']}"
+    )
     print("=" * 98)
 
 
