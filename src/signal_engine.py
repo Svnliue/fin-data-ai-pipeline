@@ -2,6 +2,7 @@ import polars as pl
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from db import get_db_connection
+from logger import get_logger
 from config import (
     SYMBOLS,
     BENCHMARK_SYMBOL,
@@ -9,7 +10,10 @@ from config import (
     PORTFOLIO_CAPITAL,
     RISK_PER_TRADE,
     MAX_POSITION_PCT,
+    2.0,
 )
+
+log = get_logger("signal_engine")
 
 
 def load_prices_df() -> pl.DataFrame:
@@ -84,7 +88,7 @@ def compute_technical_and_risk(df: pl.DataFrame, qqq_ret_20d: float) -> pl.DataF
 
 
 def compute_finbert_sentiment() -> dict[str, tuple[float, int]]:
-    print(f"--- FinBERT Finansal Duygu Modeli Yükleniyor ({FINBERT_MODEL}) ---")
+    log.info(f"FinBERT Finansal Duygu Modeli Yükleniyor ({FINBERT_MODEL})")
     tokenizer = AutoTokenizer.from_pretrained(FINBERT_MODEL)
     model = AutoModelForSequenceClassification.from_pretrained(FINBERT_MODEL)
     model.eval()
@@ -194,9 +198,10 @@ def generate_signal(row: dict, sentiment: float, is_macro_bull: bool) -> tuple[s
     else:
         decision = "BEKLE / TUT"
 
-    stop_loss = max(0.01, close - (2.0 * atr))
-    take_profit = close + (3.0 * atr)
-    risk_per_share = max(0.01, close - stop_loss)
+    # Chandelier Exit (İz Süren Zarar-Kes Başlangıç Seviyesi)
+    initial_trailing_stop = max(0.01, close - (2.0 * atr))
+    reference_target = close + (3.0 * atr)
+    risk_per_share = max(0.01, close - initial_trailing_stop)
 
     max_risk_usd = PORTFOLIO_CAPITAL * RISK_PER_TRADE
     risk_based_shares = int(max_risk_usd // risk_per_share)
@@ -206,8 +211,8 @@ def generate_signal(row: dict, sentiment: float, is_macro_bull: bool) -> tuple[s
     risk_plan = {
         "sma_200": round(sma200, 2) if sma200 else 0.0,
         "atr": round(atr, 2),
-        "stop_loss": round(stop_loss, 2),
-        "take_profit": round(take_profit, 2),
+        "stop_loss": round(initial_trailing_stop, 2),
+        "take_profit": round(reference_target, 2),
         "shares": suggested_shares,
         "position_usd": round(suggested_shares * close, 2),
     }
@@ -241,9 +246,10 @@ def main():
     sentiment_map = compute_finbert_sentiment()
 
     regime_label = "BOĞA REJİMİ (Makro Kilit Açık)" if is_macro_bull else "AYI REJİMİ (Makro Kilit Aktif)"
+    log.info(f"Makro Rejim [{BENCHMARK_SYMBOL}]: ${qqq_close:.2f} vs SMA-200 ${qqq_sma200:.2f} -> {regime_label}")
 
     print("\n" + "=" * 84)
-    print("2 KATMANLI KURUMSAL SİNYAL, GÖRECELİ GÜÇ (RS) VE ATR RİSK RAPORU")
+    print("2 KATMANLI KURUMSAL SİNYAL, GÖRECELİ GÜÇ (RS) VE ATR DİNAMİK RİSK RAPORU")
     print(f"KATMAN-1 MAKRO KİLİT [{BENCHMARK_SYMBOL}]: ${qqq_close:.2f} vs SMA-200 ${qqq_sma200:.2f} -> {regime_label}")
     print("=" * 84)
 
@@ -252,6 +258,7 @@ def main():
         sent_score, _ = sentiment_map.get(sym, (0.0, 0))
         decision, total_score, reasons, risk = generate_signal(row, sent_score, is_macro_bull)
         persist_signal(sym, decision, total_score, row["close"], risk, sent_score)
+        log.info(f"[{sym}] Karar={decision} | Skor={total_score:+.2f} | TrailingSL=${risk['stop_loss']:.2f}")
 
         print(f"\n[{sym}] KARAR: {decision} (Güven Skoru: {total_score:+.2f})")
         print(f"  - Fiyat: ${row['close']:.2f} | SMA-50: ${row['sma_50']:.2f} | SMA-200: ${risk['sma_200']:.2f} | RSI-14: {row['rsi_14']:.1f}")

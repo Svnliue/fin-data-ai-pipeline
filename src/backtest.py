@@ -1,6 +1,14 @@
 import polars as pl
 from db import get_db_connection
-from config import SYMBOLS, BENCHMARK_SYMBOL, PORTFOLIO_CAPITAL, COMMISSION_RATE
+from logger import get_logger
+from config import (
+    SYMBOLS,
+    BENCHMARK_SYMBOL,
+    PORTFOLIO_CAPITAL,
+    COMMISSION_RATE,
+)
+
+log = get_logger("backtest")
 
 
 def build_regime_map(df: pl.DataFrame) -> pl.DataFrame:
@@ -145,7 +153,7 @@ def main():
     regime_df = build_regime_map(df)
 
     print("=" * 98)
-    print(f"KURUMSAL BACKTEST KARNESİ [KATMAN-1: {BENCHMARK_SYMBOL} & HİSSE SMA-200 KİLİTLİ] (${PORTFOLIO_CAPITAL:,.0f} | %{COMMISSION_RATE*100:.1f} Komisyon)")
+    print(f"KURUMSAL BACKTEST KARNESİ [2x SL / 3x TP + ÇİFT SMA-200 KİLİT] (${PORTFOLIO_CAPITAL:,.0f} | %{COMMISSION_RATE*100:.1f} Komisyon)")
     print("=" * 98)
 
     total_start = PORTFOLIO_CAPITAL * len(SYMBOLS)
@@ -154,6 +162,7 @@ def main():
     for sym in SYMBOLS:
         res = run_backtest_for_symbol(df, regime_df, sym)
         total_end += res["final_capital"]
+        log.info(f"[{sym}] Return={res['return_pct']:+.2f}% | MaxDD={res['max_dd']:.2f}% | PF={res['profit_factor']:.2f}")
         print(
             f"[{res['symbol']:4s}] İşlem: {res['trades']:2d} (Kilitlenen: {res['blocked']:2d}) | "
             f"Win: %{res['win_rate']:5.1f} | "
