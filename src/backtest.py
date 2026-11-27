@@ -157,7 +157,6 @@ def run_shared_portfolio_backtest(feat_df: pl.DataFrame) -> dict:
         day_rows = rows_by_date[d]
         last_prices = {r["symbol"]: r["close"] for r in day_rows}
 
-        # 1. Acik pozisyon cikislari
         for r in day_rows:
             sym = r["symbol"]
             if sym not in positions or r["sma_50"] is None:
@@ -176,7 +175,6 @@ def run_shared_portfolio_backtest(feat_df: pl.DataFrame) -> dict:
                 del positions[sym]
                 total_trades += 1
 
-        # 2. Yeni girisler (Max 3 eszamanli pozisyon + %25 tavan)
         for r in day_rows:
             sym = r["symbol"]
             if sym in positions or r["sma_50"] is None or r["atr_14"] is None:
