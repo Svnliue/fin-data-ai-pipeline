@@ -10,7 +10,6 @@ from config import (
     PORTFOLIO_CAPITAL,
     RISK_PER_TRADE,
     MAX_POSITION_PCT,
-    2.0,
 )
 
 log = get_logger("signal_engine")
