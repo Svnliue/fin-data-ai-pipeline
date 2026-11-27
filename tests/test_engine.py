@@ -90,3 +90,22 @@ def test_position_sizing_respects_max_cap():
     _, _, _, risk = generate_signal(row, asset_type="STOCK", sentiment=0.50, is_macro_bull=True)
     assert risk["shares"] == 25
     assert risk["position_usd"] <= 2500.0
+
+
+def test_held_position_evaluation_take_profit_and_exit():
+    from signal_engine import evaluate_held_position
+    row_profit = {
+        "close": 120.0,
+        "sma_20": 115.0,
+        "sma_50": 110.0,
+        "sma_200": 100.0,
+        "rsi_14": 65.0,
+        "atr_14": 4.0,
+        "vol_ratio": 1.3,
+        "rs_vs_qqq_pct": 5.0,
+    }
+    pos = {"shares": 10.0, "entry_price": 100.0}
+    dec, _, _, risk = evaluate_held_position(row_profit, pos, asset_type="STOCK", sentiment=0.40)
+    assert "KÂR AL" in dec
+    assert risk["pnl_usd"] == 200.0
+    assert risk["pnl_pct"] == 20.0

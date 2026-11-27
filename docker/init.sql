@@ -58,3 +58,11 @@ INSERT INTO watchlist (symbol, asset_type, is_active) VALUES
     ('GLD', 'ETF', TRUE),
     ('XLE', 'ETF', TRUE)
 ON CONFLICT (symbol) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS portfolio_positions (
+    symbol VARCHAR(20) PRIMARY KEY,
+    shares NUMERIC(14, 4) NOT NULL,
+    entry_price NUMERIC(14, 4) NOT NULL,
+    entry_date DATE DEFAULT CURRENT_DATE,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
