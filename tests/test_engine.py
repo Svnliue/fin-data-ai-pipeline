@@ -131,3 +131,22 @@ def test_leveraged_max_hold_and_cash_limits():
     # 3/3 acik pozisyon doluyken yeni alim kilitlenmeli
     dec_cap, _, _, _ = generate_signal(row, asset_type="STOCK", sentiment=0.80, is_macro_bull=True, open_positions_count=3)
     assert "Max Açık Pozisyon Dolu" in dec_cap
+
+
+def test_true_trailing_stop_never_decreases_and_scaled_out_flag():
+    from signal_engine import evaluate_held_position
+    row_drop = {
+        "close": 103.0,
+        "sma_20": 102.0,
+        "sma_50": 95.0,
+        "sma_200": 85.0,
+        "rsi_14": 55.0,
+        "atr_14": 3.0,
+        "vol_ratio": 1.1,
+        "rs_vs_qqq_pct": 3.0,
+    }
+    # Onceki stop 100.0 ise close=103, 2*ATR=6 -> aday stop 97.0 olsa bile stop 100.0'in altina dusmemeli
+    pos = {"shares": 10.0, "entry_price": 95.0, "stop_loss": 100.0, "tp1": 102.0, "tp2": 115.0, "scaled_out": True}
+    dec, _, _, risk = evaluate_held_position(row_drop, pos, asset_type="STOCK", sentiment=0.40)
+    assert risk["stop_loss"] == 100.0
+    assert "KISMİ KÂR AL" not in dec

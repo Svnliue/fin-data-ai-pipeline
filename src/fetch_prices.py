@@ -2,9 +2,10 @@ import time
 import polars as pl
 import yfinance as yf
 from db import get_db_connection
+from logger import get_logger
 from config import get_active_symbols, BENCHMARK_SYMBOL, PRICE_PERIOD
 
-ALL_TICKERS = get_active_symbols() + [BENCHMARK_SYMBOL]
+log = get_logger("fetch_prices")
 
 
 def fetch_with_retry(symbol: str, period: str, max_retries: int = 3) -> pl.DataFrame:
@@ -31,7 +32,7 @@ def fetch_with_retry(symbol: str, period: str, max_retries: int = 3) -> pl.DataF
             if attempt == max_retries:
                 raise RuntimeError(f"{symbol} {max_retries} denemede de çekilemedi: {exc}") from exc
             wait_sec = 2 ** attempt
-            print(f"[UYARI] {symbol} bağlantı hatası (Deneme {attempt}/{max_retries}). {wait_sec} sn bekleniyor...")
+            log.warning(f"{symbol} bağlantı hatası (Deneme {attempt}/{max_retries}). {wait_sec} sn bekleniyor...")
             time.sleep(wait_sec)
 
     return pl.DataFrame()
@@ -60,17 +61,24 @@ def upsert_prices(df: pl.DataFrame) -> int:
     return len(rows)
 
 
-def main():
-    print("--- Finansal Fiyat ETL Boru Hattı Başlatıldı (Retry + Merkezi Config) ---")
+def main(symbols: list[str] | None = None) -> dict:
+    log.info("Finansal Fiyat ETL Boru Hattı Başlatıldı (Dinamik Watchlist + Açık Pozisyonlar)")
+    tickers = sorted(set((symbols or get_active_symbols()) + [BENCHMARK_SYMBOL]))
     total_records = 0
+    failed = []
 
-    for sym in ALL_TICKERS:
-        df = fetch_with_retry(sym, PRICE_PERIOD)
-        inserted = upsert_prices(df)
-        total_records += inserted
-        print(f"[BAŞARILI] {sym}: {inserted} günlük veri Polars ile işlendi ve DB'ye yazıldı.")
+    for sym in tickers:
+        try:
+            df = fetch_with_retry(sym, PRICE_PERIOD)
+            inserted = upsert_prices(df)
+            total_records += inserted
+            print(f"[BAŞARILI] {sym}: {inserted} günlük veri Polars ile işlendi ve DB'ye yazıldı.")
+        except Exception as exc:
+            failed.append(sym)
+            log.error(f"[HATA] {sym} fiyat verisi atlandı: {exc}")
 
-    print(f"--- Tamamlandı: Toplam {total_records} kayıt işlendi ---")
+    print(f"--- Tamamlandı: Toplam {total_records} kayıt işlendi | Hatalı: {len(failed)} ---")
+    return {"total_records": total_records, "failed": failed}
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ from config import (
     PORTFOLIO_CAPITAL,
     RISK_PER_TRADE,
     MAX_POSITION_PCT,
+    MAX_OPEN_POSITIONS,
 )
 
 log = get_logger("signal_engine")
@@ -20,7 +21,7 @@ log = get_logger("signal_engine")
 EARNINGS_BLACKOUT_DAYS = 3
 SHOCK_NEWS_THRESHOLD = -0.75
 SHOCK_VOL_RATIO = 2.5
-MAX_OPEN_POSITIONS = 3
+NEWS_LOOKBACK_DAYS = 7
 
 _FINBERT_CACHE: tuple | None = None
 
@@ -39,7 +40,7 @@ def _get_finbert_pipeline():
 def load_prices_df() -> pl.DataFrame:
     query = """
         SELECT symbol, price_date,
-               open_price::float AS high_open,
+               open_price::float AS open,
                high_price::float AS high,
                low_price::float AS low,
                close_price::float AS close,
@@ -57,7 +58,9 @@ def load_prices_df() -> pl.DataFrame:
 
 def load_portfolio_positions() -> dict[str, dict]:
     query = """
-        SELECT symbol, shares::float, entry_price::float, entry_date
+        SELECT symbol, shares::float, entry_price::float,
+               initial_atr::float, stop_loss::float, tp1::float, tp2::float,
+               COALESCE(scaled_out, FALSE), entry_date
         FROM portfolio_positions;
     """
     with get_db_connection() as conn:
@@ -65,9 +68,29 @@ def load_portfolio_positions() -> dict[str, dict]:
             cur.execute(query)
             rows = cur.fetchall()
     return {
-        sym: {"shares": shares, "entry_price": entry_px, "entry_date": edate}
-        for sym, shares, entry_px, edate in rows
+        sym: {
+            "shares": shares,
+            "entry_price": entry_px,
+            "initial_atr": i_atr,
+            "stop_loss": sl,
+            "tp1": tp1,
+            "tp2": tp2,
+            "scaled_out": scaled,
+            "entry_date": edate,
+        }
+        for sym, shares, entry_px, i_atr, sl, tp1, tp2, scaled, edate in rows
     }
+
+
+def load_realized_pnl() -> float:
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COALESCE(SUM(realized_pnl), 0)::float FROM trades;")
+                row = cur.fetchone()
+                return float(row[0]) if row else 0.0
+    except Exception:
+        return 0.0
 
 
 def get_benchmark_metrics(df: pl.DataFrame) -> tuple[bool, float, float, float]:
@@ -123,17 +146,19 @@ def compute_technical_and_risk(df: pl.DataFrame, symbols: list[str], qqq_ret_20d
     return df.group_by("symbol").last().sort("symbol")
 
 
-def compute_finbert_sentiment(symbols: list[str]) -> dict[str, tuple[float, float, int]]:
+def compute_finbert_sentiment(symbols: list[str], lookback_days: int = NEWS_LOOKBACK_DAYS) -> dict[str, tuple[float, float, int]]:
     tokenizer, model = _get_finbert_pipeline()
 
     query = """
         SELECT symbol, title, content
         FROM market_news
+        WHERE published_at >= NOW() - (%s * INTERVAL '1 day')
+           OR published_at IS NULL
         ORDER BY published_at DESC NULLS LAST;
     """
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(query)
+            cur.execute(query, (lookback_days,))
             rows = cur.fetchall()
 
     scores_by_symbol: dict[str, list[float]] = {s: [] for s in symbols}
@@ -179,12 +204,12 @@ def get_days_to_earnings(symbol: str, asset_type: str) -> int | None:
 
 def _score_factors(row: dict, asset_type: str, sentiment: float) -> tuple[float, list[str], float, float]:
     close = row["close"]
-    sma20 = row["sma_20"]
-    sma50 = row["sma_50"]
-    rsi = row["rsi_14"]
-    atr = row["atr_14"] or (close * 0.02)
-    vol_ratio = row["vol_ratio"] or 1.0
-    rs_pct = row["rs_vs_qqq_pct"] or 0.0
+    sma20 = row.get("sma_20")
+    sma50 = row.get("sma_50")
+    rsi = row.get("rsi_14")
+    atr = row.get("atr_14") or (close * 0.02)
+    vol_ratio = row.get("vol_ratio") or 1.0
+    rs_pct = row.get("rs_vs_qqq_pct") or 0.0
 
     score = 0.0
     reasons = [f"Profil: {asset_type}"]
@@ -198,6 +223,8 @@ def _score_factors(row: dict, asset_type: str, sentiment: float) -> tuple[float,
             reasons.append("Kısa/Orta düşüş trendi (Fiyat < SMA20 < SMA50)")
         else:
             reasons.append("Yatay/Karışık ortalama")
+    else:
+        reasons.append("Yetersiz ortalama geçmişi (Warm-up)")
 
     if rs_pct >= 2.0:
         score += 0.5
@@ -245,10 +272,11 @@ def generate_signal(
     days_to_earnings: int | None = None,
     available_cash: float = PORTFOLIO_CAPITAL,
     open_positions_count: int = 0,
+    effective_capital: float = PORTFOLIO_CAPITAL,
 ) -> tuple[str, float, list[str], dict]:
     profile = ASSET_PROFILES.get(asset_type, ASSET_PROFILES["STOCK"])
     close = row["close"]
-    sma200 = row["sma_200"]
+    sma200 = row.get("sma_200")
     delta = row.get("delta") or 0.0
     is_stock_bull = (close >= sma200) if sma200 is not None else True
 
@@ -268,7 +296,7 @@ def generate_signal(
     if days_to_earnings is not None and days_to_earnings <= EARNINGS_BLACKOUT_DAYS:
         hard_lock_reasons.append(f"Bilanço Koruması ({days_to_earnings} gün kaldı)")
     if news_shock:
-        hard_lock_reasons.append(f"Haber Şoku Kilidi (Min FinBERT: {min_news_score:+.2f})")
+        hard_lock_reasons.append(f"Haber Şoku Kilidi (7g Min FinBERT: {min_news_score:+.2f})")
     if vol_price_shock:
         hard_lock_reasons.append(f"Hacim/Fiyat Şoku ({vol_ratio:.1f}x hacim)")
 
@@ -278,9 +306,9 @@ def generate_signal(
     take_profit = close + (profile["tp2_atr"] * atr)
     risk_per_share = max(0.01, close - stop_loss)
 
-    max_risk_usd = PORTFOLIO_CAPITAL * RISK_PER_TRADE
+    max_risk_usd = effective_capital * RISK_PER_TRADE
     risk_based_shares = int(max_risk_usd // risk_per_share)
-    cap_based_shares = int((PORTFOLIO_CAPITAL * MAX_POSITION_PCT) // max(0.01, close))
+    cap_based_shares = int((effective_capital * MAX_POSITION_PCT) // max(0.01, close))
     cash_based_shares = int(max(0.0, available_cash) // max(0.01, close))
     suggested_shares = min(risk_based_shares, cap_based_shares, cash_based_shares)
 
@@ -299,7 +327,9 @@ def generate_signal(
         "max_hold": profile["max_hold_days"],
         "shock_active": shock_active,
         "days_to_earnings": days_to_earnings,
-        "sma_200": round(sma200, 2) if sma200 else 0.0,
+        "sma_50": round(row["sma_50"], 2) if row.get("sma_50") is not None else None,
+        "sma_200": round(sma200, 2) if sma200 is not None else None,
+        "rsi_14": round(row["rsi_14"], 1) if row.get("rsi_14") is not None else None,
         "atr": round(atr, 2),
         "stop_loss": round(stop_loss, 2),
         "partial_tp": round(partial_tp, 2),
@@ -323,13 +353,14 @@ def evaluate_held_position(
 ) -> tuple[str, float, list[str], dict]:
     profile = ASSET_PROFILES.get(asset_type, ASSET_PROFILES["STOCK"])
     close = row["close"]
-    sma20 = row["sma_20"]
-    sma200 = row["sma_200"]
+    sma20 = row.get("sma_20")
+    sma200 = row.get("sma_200")
     delta = row.get("delta") or 0.0
 
     entry_price = position["entry_price"]
     shares = position["shares"]
     entry_date = position.get("entry_date")
+    scaled_out = bool(position.get("scaled_out", False))
     ref_date = as_of_date or datetime.now(timezone.utc).date()
 
     days_held = 0
@@ -341,36 +372,45 @@ def evaluate_held_position(
     pnl_usd = (close - entry_price) * shares
     pnl_pct = ((close - entry_price) / entry_price) * 100.0
 
-    score, reasons, atr, vol_ratio = _score_factors(row, asset_type, sentiment)
+    score, reasons, current_atr, vol_ratio = _score_factors(row, asset_type, sentiment)
+    base_atr = position.get("initial_atr") or current_atr
+
     news_shock = min_news_score <= SHOCK_NEWS_THRESHOLD
-    vol_price_shock = (vol_ratio >= SHOCK_VOL_RATIO) and (delta <= -2.5 * atr)
+    vol_price_shock = (vol_ratio >= SHOCK_VOL_RATIO) and (delta <= -2.5 * current_atr)
     shock_active = news_shock or vol_price_shock
 
+    # Sabit giris hedefleri (yoksa initial_atr ile uret)
+    tp1_target = position.get("tp1") or (entry_price + (profile["tp1_atr"] * base_atr))
+    tp2_target = position.get("tp2") or (entry_price + (profile["tp2_atr"] * base_atr))
+
+    # Gercek Trailing Stop: onceki stopun altina ASLA dusmez
+    prev_sl = position.get("stop_loss") or max(0.01, entry_price - (profile["sl_atr"] * base_atr))
     effective_sl_mult = 0.75 if shock_active else profile["sl_atr"]
-    dynamic_sl = max(0.01, close - (effective_sl_mult * atr))
-    tp1_target = entry_price + (profile["tp1_atr"] * atr)
-    tp2_target = entry_price + (profile["tp2_atr"] * atr)
+    candidate_sl = max(0.01, close - (effective_sl_mult * current_atr))
+    trailing_sl = round(max(prev_sl, candidate_sl), 2)
 
     max_hold = profile["max_hold_days"]
     expired_leveraged = (max_hold is not None) and (days_held >= max_hold)
 
-    if close <= entry_price - (profile["sl_atr"] * atr):
-        decision = "POZİSYONU KAPAT (STOP-LOSS SEVİYESİ KIRILDI)"
+    if close <= trailing_sl:
+        decision = f"POZİSYONU KAPAT (TRAILING STOP KIRILDI: ${trailing_sl:.2f})"
     elif expired_leveraged:
         decision = f"POZİSYONU KAPAT (LEVERAGED MAX SÜRE DOLDU: {days_held}/{max_hold} GÜN — VOLATILITY DECAY)"
     elif score <= -1.5 or (sma20 is not None and close < sma20 and score < 0):
         decision = "POZİSYONU KAPAT (SAT — TREND / MOMENTUM BOZULDU)"
     elif close >= tp2_target:
         decision = "KÂR AL VE KAPAT (TP-2 ANA HEDEF GELDİ)"
-    elif close >= tp1_target:
-        dynamic_sl = max(dynamic_sl, entry_price * 1.003)
+    elif close >= tp1_target and not scaled_out:
+        trailing_sl = round(max(trailing_sl, entry_price * 1.003), 2)
         decision = "KISMİ KÂR AL (%50 SAT + STOP MALİYETE ÇEKİLDİ)"
     else:
         notes = []
+        if scaled_out:
+            notes.append("TP-1 Kısmi Kâr Alındı (Breakeven Koruma)")
         if max_hold is not None:
             notes.append(f"Kaldıraç Süresi: {days_held}/{max_hold}g")
         if shock_active:
-            notes.append("Şok Aktif: Stop 0.75x ATR'ye sıkılaştırıldı")
+            notes.append("Şok Aktif: Trailing Stop Sıkılaştırıldı")
         if days_to_earnings is not None and days_to_earnings <= EARNINGS_BLACKOUT_DAYS:
             notes.append(f"Bilançoya {days_to_earnings}g kaldı — risk azaltılabilir")
         suffix = f" ({' | '.join(notes)})" if notes else ""
@@ -382,19 +422,42 @@ def evaluate_held_position(
         "entry_price": round(entry_price, 2),
         "days_held": days_held,
         "max_hold": max_hold,
+        "scaled_out": scaled_out,
         "pnl_usd": round(pnl_usd, 2),
         "pnl_pct": round(pnl_pct, 2),
         "shock_active": shock_active,
         "days_to_earnings": days_to_earnings,
-        "sma_200": round(sma200, 2) if sma200 else 0.0,
-        "atr": round(atr, 2),
-        "stop_loss": round(dynamic_sl, 2),
+        "sma_50": round(row["sma_50"], 2) if row.get("sma_50") is not None else None,
+        "sma_200": round(sma200, 2) if sma200 is not None else None,
+        "rsi_14": round(row["rsi_14"], 1) if row.get("rsi_14") is not None else None,
+        "atr": round(current_atr, 2),
+        "stop_loss": trailing_sl,
         "partial_tp": round(tp1_target, 2),
         "take_profit": round(tp2_target, 2),
         "position_usd": round(shares * close, 2),
     }
 
     return decision, round(score, 2), reasons, risk_plan
+
+
+def _update_position_trailing_state(symbol: str, stop_loss: float, tp1: float, tp2: float) -> None:
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE portfolio_positions
+                    SET stop_loss = GREATEST(COALESCE(stop_loss, 0), %s),
+                        tp1 = COALESCE(tp1, %s),
+                        tp2 = COALESCE(tp2, %s),
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE symbol = %s;
+                    """,
+                    (stop_loss, tp1, tp2, symbol),
+                )
+            conn.commit()
+    except Exception:
+        pass
 
 
 def persist_signal(symbol: str, decision: str, score: float, close: float, risk: dict, sentiment: float) -> None:
@@ -416,54 +479,50 @@ def persist_signal(symbol: str, decision: str, score: float, close: float, risk:
         conn.commit()
 
 
-def main():
+def run_analysis(persist: bool = True) -> dict:
+    """FastAPI ve CLI tarafindan cagrilan yapilandirilmis analiz motoru."""
     asset_map = get_active_asset_map()
     positions = load_portfolio_positions()
     all_symbols = sorted(set(asset_map.keys()) | set(positions.keys()))
 
-    invested_cost = sum(p["shares"] * p["entry_price"] for p in positions.values())
-    available_cash = max(0.0, PORTFOLIO_CAPITAL - invested_cost)
+    realized_pnl = load_realized_pnl()
+    effective_capital = round(PORTFOLIO_CAPITAL + realized_pnl, 2)
+    invested_cost = round(sum(p["shares"] * p["entry_price"] for p in positions.values()), 2)
+    available_cash = round(max(0.0, effective_capital - invested_cost), 2)
 
     prices_df = load_prices_df()
     is_macro_bull, qqq_close, qqq_sma200, qqq_ret_20d = get_benchmark_metrics(prices_df)
     tech_df = compute_technical_and_risk(prices_df, all_symbols, qqq_ret_20d)
     sentiment_map = compute_finbert_sentiment(all_symbols)
-
-    regime_label = "BOĞA REJİMİ (Hisse Kilidi Açık)" if is_macro_bull else "AYI REJİMİ (STOCK Kilidi Aktif | COMMODITY/ETF Bağımsız)"
-    log.info(f"Makro Rejim [{BENCHMARK_SYMBOL}]: ${qqq_close:.2f} vs SMA-200 ${qqq_sma200:.2f} -> {regime_label}")
-
     rows_by_sym = {r["symbol"]: r for r in tech_df.iter_rows(named=True)}
 
-    print("\n" + "=" * 100)
-    print("ALPHA ENGINE v4.9.5 RAPORU [1. AÇIK POZİSYONLARIM  |  2. İZLEME LİSTESİ FIRSAT RADARI]")
-    print(f"MAKRO REJİM [{BENCHMARK_SYMBOL}]: ${qqq_close:.2f} vs SMA-200 ${qqq_sma200:.2f} -> {regime_label}")
-    print(f"SERMAYE DURUMU: Toplam ${PORTFOLIO_CAPITAL:,.2f} | Bağlı Maliyet: ${invested_cost:,.2f} | Serbest Nakit: ${available_cash:,.2f} | Pozisyon: {len(positions)}/{MAX_OPEN_POSITIONS}")
-    print("=" * 100)
-
-    print("\n>>> BÖLÜM 1: AÇIK POZİSYONLARIM (PORTFÖYDEKİ VARLIKLAR)")
-    if not positions:
-        print("  Portföyde şu an açık pozisyon yok. (Eklemek için: python src/portfolio_cli.py buy <SEMBOL> <ADET> <MALİYET>)")
-    else:
-        for sym in sorted(positions.keys()):
-            if sym not in rows_by_sym:
-                continue
-            row = rows_by_sym[sym]
-            atype = asset_map.get(sym, "STOCK")
-            sent_score, min_sent, _ = sentiment_map.get(sym, (0.0, 0.0, 0))
-            earnings_days = get_days_to_earnings(sym, atype)
-            decision, total_score, reasons, risk = evaluate_held_position(
-                row, positions[sym], atype, sent_score, min_news_score=min_sent, days_to_earnings=earnings_days
-            )
+    held_results = []
+    for sym in sorted(positions.keys()):
+        if sym not in rows_by_sym:
+            continue
+        row = rows_by_sym[sym]
+        atype = asset_map.get(sym, "STOCK")
+        sent_score, min_sent, _ = sentiment_map.get(sym, (0.0, 0.0, 0))
+        earnings_days = get_days_to_earnings(sym, atype)
+        decision, total_score, reasons, risk = evaluate_held_position(
+            row, positions[sym], atype, sent_score, min_news_score=min_sent, days_to_earnings=earnings_days
+        )
+        if persist:
+            _update_position_trailing_state(sym, risk["stop_loss"], risk["partial_tp"], risk["take_profit"])
             persist_signal(sym, f"[PORTFÖY] {decision}", total_score, row["close"], risk, sent_score)
-            shock_note = " [ŞOK: SIKI STOP 0.75x ATR]" if risk["shock_active"] else ""
-            print(f"\n[{sym} | {atype}] POZİSYON KARARI: {decision} (Skor: {total_score:+.2f})")
-            print(f"  - Adet: {risk['shares']:.2f} | Maliyet: ${risk['entry_price']:.2f} -> Güncel: ${row['close']:.2f} | Kâr/Zarar: ${risk['pnl_usd']:+.2f} ({risk['pnl_pct']:+.2f}%)")
-            print(f"  - Güncel Trailing Stop: ${risk['stop_loss']:.2f}{shock_note} | TP-1 Hedef: ${risk['partial_tp']:.2f} | TP-2 Hedef: ${risk['take_profit']:.2f}")
-            print(f"  - Puan Detayı: {' | '.join(reasons)}")
+        held_results.append({
+            "symbol": sym,
+            "asset_type": atype,
+            "decision": decision,
+            "score": total_score,
+            "close": round(row["close"], 2),
+            "sentiment": sent_score,
+            "reasons": reasons,
+            "risk": risk,
+        })
 
-    print("\n>>> BÖLÜM 2: İZLEME LİSTESİ (YENİ GİRİŞ FIRSAT RADARI)")
-    radar_symbols = [s for s in sorted(asset_map.keys()) if s not in positions]
-    for sym in radar_symbols:
+    radar_results = []
+    for sym in [s for s in sorted(asset_map.keys()) if s not in positions]:
         if sym not in rows_by_sym:
             continue
         row = rows_by_sym[sym]
@@ -479,17 +538,85 @@ def main():
             days_to_earnings=earnings_days,
             available_cash=available_cash,
             open_positions_count=len(positions),
+            effective_capital=effective_capital,
         )
-        persist_signal(sym, decision, total_score, row["close"], risk, sent_score)
+        if persist:
+            persist_signal(sym, decision, total_score, row["close"], risk, sent_score)
+        radar_results.append({
+            "symbol": sym,
+            "asset_type": atype,
+            "decision": decision,
+            "score": total_score,
+            "close": round(row["close"], 2),
+            "sentiment": sent_score,
+            "reasons": reasons,
+            "risk": risk,
+        })
 
+    return {
+        "macro": {
+            "benchmark": BENCHMARK_SYMBOL,
+            "is_bull": is_macro_bull,
+            "close": qqq_close,
+            "sma_200": qqq_sma200,
+        },
+        "capital": {
+            "base_capital": PORTFOLIO_CAPITAL,
+            "realized_pnl": realized_pnl,
+            "effective_capital": effective_capital,
+            "invested_cost": invested_cost,
+            "available_cash": available_cash,
+            "open_positions": len(positions),
+            "max_positions": MAX_OPEN_POSITIONS,
+        },
+        "portfolio": held_results,
+        "radar": radar_results,
+    }
+
+
+def _fmt_opt(val: float | None, prefix: str = "$") -> str:
+    return f"{prefix}{val:.2f}" if val is not None else "N/A"
+
+
+def main():
+    report = run_analysis(persist=True)
+    macro = report["macro"]
+    cap = report["capital"]
+    regime_label = "BOĞA REJİMİ (Hisse Kilidi Açık)" if macro["is_bull"] else "AYI REJİMİ (STOCK Kilidi Aktif | COMMODITY/ETF Bağımsız)"
+
+    print("\n" + "=" * 100)
+    print("ALPHA ENGINE v4.9.6 RAPORU [1. AÇIK POZİSYONLARIM  |  2. İZLEME LİSTESİ FIRSAT RADARI]")
+    print(f"MAKRO REJİM [{macro['benchmark']}]: ${macro['close']:.2f} vs SMA-200 ${macro['sma_200']:.2f} -> {regime_label}")
+    print(
+        f"SERMAYE DURUMU: Efektif ${cap['effective_capital']:,.2f} (Realized PnL: ${cap['realized_pnl']:+,.2f}) | "
+        f"Bağlı: ${cap['invested_cost']:,.2f} | Serbest Nakit: ${cap['available_cash']:,.2f} | "
+        f"Pozisyon: {cap['open_positions']}/{cap['max_positions']}"
+    )
+    print("=" * 100)
+
+    print("\n>>> BÖLÜM 1: AÇIK POZİSYONLARIM (PORTFÖYDEKİ VARLIKLAR)")
+    if not report["portfolio"]:
+        print("  Portföyde şu an açık pozisyon yok. (Eklemek için: python src/portfolio_cli.py buy <SEMBOL> <ADET> <MALİYET>)")
+    else:
+        for item in report["portfolio"]:
+            risk = item["risk"]
+            shock_note = " [ŞOK: SIKI TRAILING STOP]" if risk["shock_active"] else ""
+            print(f"\n[{item['symbol']} | {item['asset_type']}] POZİSYON KARARI: {item['decision']} (Skor: {item['score']:+.2f})")
+            print(f"  - Adet: {risk['shares']:.2f} | Maliyet: ${risk['entry_price']:.2f} -> Güncel: ${item['close']:.2f} | Kâr/Zarar: ${risk['pnl_usd']:+.2f} ({risk['pnl_pct']:+.2f}%)")
+            print(f"  - Sabit Trailing Stop: ${risk['stop_loss']:.2f}{shock_note} | Sabit TP-1: ${risk['partial_tp']:.2f} | Sabit TP-2: ${risk['take_profit']:.2f}")
+            print(f"  - Puan Detayı: {' | '.join(item['reasons'])}")
+
+    print("\n>>> BÖLÜM 2: İZLEME LİSTESİ (YENİ GİRİŞ FIRSAT RADARI)")
+    for item in report["radar"]:
+        risk = item["risk"]
         hold_note = f" | Max Süre: {risk['max_hold']} gün" if risk["max_hold"] else ""
-        earn_note = f" | Bilanço: {earnings_days}g" if earnings_days is not None else ""
-        print(f"\n[{sym} | {atype}] RADAR KARARI: {decision} (Güven Skoru: {total_score:+.2f}){earn_note}")
-        print(f"  - Fiyat: ${row['close']:.2f} | SMA-50: ${row['sma_50']:.2f} | SMA-200: ${risk['sma_200']:.2f} | RSI-14: {row['rsi_14']:.1f}")
-        if decision.startswith("AL") or decision.startswith("GÜÇLÜ AL"):
+        earn_note = f" | Bilanço: {risk['days_to_earnings']}g" if risk["days_to_earnings"] is not None else ""
+        print(f"\n[{item['symbol']} | {item['asset_type']}] RADAR KARARI: {item['decision']} (Güven Skoru: {item['score']:+.2f}){earn_note}")
+        print(f"  - Fiyat: ${item['close']:.2f} | SMA-50: {_fmt_opt(risk['sma_50'])} | SMA-200: {_fmt_opt(risk['sma_200'])} | RSI-14: {_fmt_opt(risk['rsi_14'], '')}")
+        if item["decision"].startswith("AL") or item["decision"].startswith("GÜÇLÜ AL"):
             print(f"  - Giriş Planı -> SL: ${risk['stop_loss']:.2f} | TP-1: ${risk['partial_tp']:.2f} | TP-2: ${risk['take_profit']:.2f}{hold_note}")
-            print(f"  - Önerilen Lot (Serbest Nakit ${available_cash:,.2f}): {risk['shares']} adet (~${risk['position_usd']:.2f})")
-        print(f"  - Puan Detayı: {' | '.join(reasons)}")
+            print(f"  - Önerilen Lot (Serbest Nakit ${cap['available_cash']:,.2f}): {risk['shares']} adet (~${risk['position_usd']:.2f})")
+        print(f"  - Puan Detayı: {' | '.join(item['reasons'])}")
 
     print("\n[DB] Tüm sinyaller PostgreSQL signal_history tablosuna kaydedildi.")
     print("=" * 100)

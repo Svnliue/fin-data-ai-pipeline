@@ -55,14 +55,31 @@ INSERT INTO watchlist (symbol, asset_type, is_active) VALUES
     ('AAPL', 'STOCK', TRUE),
     ('NVDA', 'STOCK', TRUE),
     ('MSFT', 'STOCK', TRUE),
-    ('GLD', 'ETF', TRUE),
-    ('XLE', 'ETF', TRUE)
+    ('GLD', 'COMMODITY', TRUE),
+    ('XLE', 'SECTOR_ETF', TRUE)
 ON CONFLICT (symbol) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS portfolio_positions (
     symbol VARCHAR(20) PRIMARY KEY,
     shares NUMERIC(14, 4) NOT NULL,
     entry_price NUMERIC(14, 4) NOT NULL,
+    initial_atr NUMERIC(12, 4),
+    stop_loss NUMERIC(12, 4),
+    tp1 NUMERIC(12, 4),
+    tp2 NUMERIC(12, 4),
+    scaled_out BOOLEAN DEFAULT FALSE,
     entry_date DATE DEFAULT CURRENT_DATE,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS trades (
+    id SERIAL PRIMARY KEY,
+    symbol VARCHAR(20) NOT NULL,
+    shares NUMERIC(14, 4) NOT NULL,
+    entry_price NUMERIC(14, 4) NOT NULL,
+    exit_price NUMERIC(14, 4) NOT NULL,
+    realized_pnl NUMERIC(14, 4) NOT NULL,
+    exit_reason VARCHAR(255),
+    opened_at DATE,
+    closed_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );

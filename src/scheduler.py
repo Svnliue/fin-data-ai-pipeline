@@ -1,40 +1,36 @@
-import subprocess
-import sys
 import time
 from datetime import datetime
+from zoneinfo import ZoneInfo
+import schedule
 from logger import get_logger
-from config import SCHEDULE_TIME
+from pipeline_runner import run_full_pipeline
 
 log = get_logger("scheduler")
+NY_TZ = ZoneInfo("America/New_York")
 
 
-def run_once() -> None:
-    log.info("Zamanlanmış otonom pipeline tetikleniyor...")
-    res = subprocess.run([sys.executable, "src/run_pipeline.py"])
-    if res.returncode == 0:
-        log.info("Zamanlanmış pipeline başarıyla tamamlandı.")
-    else:
-        log.error(f"Zamanlanmış pipeline hata koduyla sonlandı: {res.returncode}")
+def _is_nyse_trading_day() -> bool:
+    now_ny = datetime.now(NY_TZ)
+    # Pazartesi (0) - Cuma (4) ABD seans gunu kontrolu
+    return now_ny.weekday() < 5
 
 
-def main() -> None:
-    if "--now" in sys.argv:
-        run_once()
+def scheduled_job() -> None:
+    if not _is_nyse_trading_day():
+        log.info("ABD borsası kapalı (Hafta sonu). Zamanlanmış görev atlandı.")
         return
+    log.info("NYSE seans kapanışı sonrası zamanlanmış pipeline tetiklendi.")
+    run_full_pipeline()
 
-    log.info(f"Otonom Zamanlayıcı Aktif. Hafta içi her gün saat {SCHEDULE_TIME} bekleniyor (Çıkmak için Ctrl+C)...")
-    last_run_date = None
+
+def main():
+    # NYSE 16:00 ET kapanisindan 15 dk sonra (16:15 ET) calisir -> yaz/kis saati otomatik uyumlu
+    log.info("Scheduler başlatıldı: Her ABD işlem günü 16:15 America/New_York saatinde çalışacak.")
+    schedule.every().day.at("16:15", "America/New_York").do(scheduled_job)
 
     while True:
-        now = datetime.now()
-        is_weekday = now.weekday() < 5
-        current_hhmm = now.strftime("%H:%M")
-
-        if is_weekday and current_hhmm == SCHEDULE_TIME and last_run_date != now.date():
-            run_once()
-            last_run_date = now.date()
-
-        time.sleep(20)
+        schedule.run_pending()
+        time.sleep(30)
 
 
 if __name__ == "__main__":
