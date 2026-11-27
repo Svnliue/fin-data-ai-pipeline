@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-SYMBOLS = ["AAPL", "NVDA", "MSFT", "SAGT", "IREX"]
+DEFAULT_SYMBOLS = ["AAPL", "NVDA", "MSFT", "GLD", "XLE"]
 BENCHMARK_SYMBOL = "QQQ"
 PRICE_PERIOD = "1y"
 
@@ -17,3 +17,18 @@ SCHEDULE_TIME = os.getenv("SCHEDULE_TIME", "23:30")
 
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 FINBERT_MODEL = "ProsusAI/finbert"
+
+
+def get_active_symbols() -> list[str]:
+    try:
+        from db import get_db_connection
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT symbol FROM watchlist WHERE is_active = TRUE ORDER BY symbol;")
+                rows = [r[0] for r in cur.fetchall()]
+                return rows if rows else DEFAULT_SYMBOLS
+    except Exception:
+        return DEFAULT_SYMBOLS
+
+
+SYMBOLS = get_active_symbols()

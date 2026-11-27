@@ -4,7 +4,7 @@ from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from db import get_db_connection
 from logger import get_logger
 from config import (
-    SYMBOLS,
+    get_active_symbols,
     BENCHMARK_SYMBOL,
     FINBERT_MODEL,
     PORTFOLIO_CAPITAL,
@@ -50,7 +50,7 @@ def get_benchmark_metrics(df: pl.DataFrame) -> tuple[bool, float, float, float]:
 
 
 def compute_technical_and_risk(df: pl.DataFrame, qqq_ret_20d: float) -> pl.DataFrame:
-    df = df.filter(pl.col("symbol").is_in(SYMBOLS)).sort(["symbol", "price_date"])
+    df = df.filter(pl.col("symbol").is_in(get_active_symbols())).sort(["symbol", "price_date"])
 
     df = df.with_columns([
         pl.col("close").rolling_mean(window_size=20).over("symbol").alias("sma_20"),
@@ -102,7 +102,7 @@ def compute_finbert_sentiment() -> dict[str, tuple[float, int]]:
             cur.execute(query)
             rows = cur.fetchall()
 
-    scores_by_symbol: dict[str, list[float]] = {s: [] for s in SYMBOLS}
+    scores_by_symbol: dict[str, list[float]] = {s: [] for s in get_active_symbols()}
 
     for symbol, title, content in rows:
         if symbol not in scores_by_symbol:

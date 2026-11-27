@@ -2,9 +2,9 @@ import time
 import polars as pl
 import yfinance as yf
 from db import get_db_connection
-from config import SYMBOLS, BENCHMARK_SYMBOL, PRICE_PERIOD
+from config import get_active_symbols, BENCHMARK_SYMBOL, PRICE_PERIOD
 
-ALL_TICKERS = SYMBOLS + [BENCHMARK_SYMBOL]
+ALL_TICKERS = get_active_symbols() + [BENCHMARK_SYMBOL]
 
 
 def fetch_with_retry(symbol: str, period: str, max_retries: int = 3) -> pl.DataFrame:

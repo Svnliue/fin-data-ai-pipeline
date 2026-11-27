@@ -43,3 +43,18 @@ CREATE TABLE IF NOT EXISTS signal_history (
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(symbol, signal_date)
 );
+
+CREATE TABLE IF NOT EXISTS watchlist (
+    symbol VARCHAR(20) PRIMARY KEY,
+    asset_type VARCHAR(20) DEFAULT 'STOCK',
+    is_active BOOLEAN DEFAULT TRUE,
+    added_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT INTO watchlist (symbol, asset_type, is_active) VALUES
+    ('AAPL', 'STOCK', TRUE),
+    ('NVDA', 'STOCK', TRUE),
+    ('MSFT', 'STOCK', TRUE),
+    ('GLD', 'ETF', TRUE),
+    ('XLE', 'ETF', TRUE)
+ON CONFLICT (symbol) DO NOTHING;

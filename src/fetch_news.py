@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 import yfinance as yf
 from sentence_transformers import SentenceTransformer
 from db import get_db_connection
-from config import SYMBOLS, EMBEDDING_MODEL
+from config import get_active_symbols, EMBEDDING_MODEL
 
 
 def fetch_and_embed_news(model: SentenceTransformer, symbol: str) -> int:
@@ -57,7 +57,7 @@ def main():
     model = SentenceTransformer(EMBEDDING_MODEL)
     total = 0
 
-    for sym in SYMBOLS:
+    for sym in get_active_symbols():
         count = fetch_and_embed_news(model, sym)
         total += count
         print(f"[BAŞARILI] {sym}: {count} haber vektörleştirildi ve DB'ye yazıldı.")
