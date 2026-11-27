@@ -197,10 +197,10 @@ def generate_signal(row: dict, sentiment: float, is_macro_bull: bool) -> tuple[s
     else:
         decision = "BEKLE / TUT"
 
-    # Chandelier Exit (İz Süren Zarar-Kes Başlangıç Seviyesi)
-    initial_trailing_stop = max(0.01, close - (2.0 * atr))
-    reference_target = close + (3.0 * atr)
-    risk_per_share = max(0.01, close - initial_trailing_stop)
+    stop_loss = max(0.01, close - (2.0 * atr))
+    partial_tp = close + (1.5 * atr)
+    take_profit = close + (3.5 * atr)
+    risk_per_share = max(0.01, close - stop_loss)
 
     max_risk_usd = PORTFOLIO_CAPITAL * RISK_PER_TRADE
     risk_based_shares = int(max_risk_usd // risk_per_share)
@@ -210,8 +210,9 @@ def generate_signal(row: dict, sentiment: float, is_macro_bull: bool) -> tuple[s
     risk_plan = {
         "sma_200": round(sma200, 2) if sma200 else 0.0,
         "atr": round(atr, 2),
-        "stop_loss": round(initial_trailing_stop, 2),
-        "take_profit": round(reference_target, 2),
+        "stop_loss": round(stop_loss, 2),
+        "partial_tp": round(partial_tp, 2),
+        "take_profit": round(take_profit, 2),
         "shares": suggested_shares,
         "position_usd": round(suggested_shares * close, 2),
     }
@@ -247,26 +248,26 @@ def main():
     regime_label = "BOĞA REJİMİ (Makro Kilit Açık)" if is_macro_bull else "AYI REJİMİ (Makro Kilit Aktif)"
     log.info(f"Makro Rejim [{BENCHMARK_SYMBOL}]: ${qqq_close:.2f} vs SMA-200 ${qqq_sma200:.2f} -> {regime_label}")
 
-    print("\n" + "=" * 84)
-    print("2 KATMANLI KURUMSAL SİNYAL, GÖRECELİ GÜÇ (RS) VE ATR DİNAMİK RİSK RAPORU")
+    print("\n" + "=" * 88)
+    print("ALPHA ENGINE v4.4 SİNYAL, GÖRECELİ GÜÇ (RS) VE PARÇALI KÂR (SCALE-OUT) RİSK RAPORU")
     print(f"KATMAN-1 MAKRO KİLİT [{BENCHMARK_SYMBOL}]: ${qqq_close:.2f} vs SMA-200 ${qqq_sma200:.2f} -> {regime_label}")
-    print("=" * 84)
+    print("=" * 88)
 
     for row in tech_df.iter_rows(named=True):
         sym = row["symbol"]
         sent_score, _ = sentiment_map.get(sym, (0.0, 0))
         decision, total_score, reasons, risk = generate_signal(row, sent_score, is_macro_bull)
         persist_signal(sym, decision, total_score, row["close"], risk, sent_score)
-        log.info(f"[{sym}] Karar={decision} | Skor={total_score:+.2f} | TrailingSL=${risk['stop_loss']:.2f}")
+        log.info(f"[{sym}] Karar={decision} | Skor={total_score:+.2f} | SL=${risk['stop_loss']:.2f} | TP1=${risk['partial_tp']:.2f}")
 
         print(f"\n[{sym}] KARAR: {decision} (Güven Skoru: {total_score:+.2f})")
         print(f"  - Fiyat: ${row['close']:.2f} | SMA-50: ${row['sma_50']:.2f} | SMA-200: ${risk['sma_200']:.2f} | RSI-14: {row['rsi_14']:.1f}")
-        print(f"  - ATR-14: ${risk['atr']:.2f} | Zarar-Kes (SL): ${risk['stop_loss']:.2f} | Kâr-Al (TP): ${risk['take_profit']:.2f}")
-        print(f"  - Pozisyon Planı ($10k kasa, %1 risk, %25 tavan): {risk['shares']} adet (~${risk['position_usd']:.2f})")
+        print(f"  - ATR-14: ${risk['atr']:.2f} | SL: ${risk['stop_loss']:.2f} | TP-1 (%50+Breakeven): ${risk['partial_tp']:.2f} | TP-2: ${risk['take_profit']:.2f}")
+        print(f"  - Volatilite Bazlı Lot ($10k kasa, %1 risk): {risk['shares']} adet (~${risk['position_usd']:.2f})")
         print(f"  - Katman-2 Puan Detayı: {' | '.join(reasons)}")
 
     print("\n[DB] Tüm sinyaller PostgreSQL signal_history tablosuna kaydedildi.")
-    print("=" * 84)
+    print("=" * 88)
 
 
 if __name__ == "__main__":
