@@ -109,3 +109,25 @@ def test_held_position_evaluation_take_profit_and_exit():
     assert "KÂR AL" in dec
     assert risk["pnl_usd"] == 200.0
     assert risk["pnl_pct"] == 20.0
+
+
+def test_leveraged_max_hold_and_cash_limits():
+    from signal_engine import evaluate_held_position, generate_signal
+    row = {
+        "close": 100.0,
+        "sma_20": 95.0,
+        "sma_50": 90.0,
+        "sma_200": 80.0,
+        "rsi_14": 60.0,
+        "atr_14": 2.0,
+        "vol_ratio": 1.3,
+        "rs_vs_qqq_pct": 5.0,
+    }
+    # 11 gundur tutulan LEVERAGED urun volatility decay nedeniyle kapatilmali
+    pos_old = {"shares": 10.0, "entry_price": 98.0, "entry_date": date.today() - timedelta(days=11)}
+    dec_lev, _, _, _ = evaluate_held_position(row, pos_old, asset_type="LEVERAGED", sentiment=0.50)
+    assert "LEVERAGED MAX SÜRE DOLDU" in dec_lev
+
+    # 3/3 acik pozisyon doluyken yeni alim kilitlenmeli
+    dec_cap, _, _, _ = generate_signal(row, asset_type="STOCK", sentiment=0.80, is_macro_bull=True, open_positions_count=3)
+    assert "Max Açık Pozisyon Dolu" in dec_cap
