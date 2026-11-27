@@ -56,6 +56,26 @@ def test_macro_bear_regime_locks_stock_but_allows_commodity():
     assert decision_gold == "GÜÇLÜ AL"
 
 
+def test_earnings_and_news_shock_guards():
+    row = {
+        "close": 100.0,
+        "sma_20": 95.0,
+        "sma_50": 90.0,
+        "sma_200": 80.0,
+        "rsi_14": 55.0,
+        "atr_14": 4.0,
+        "vol_ratio": 1.4,
+        "rs_vs_qqq_pct": 6.0,
+    }
+    dec_earn, _, _, _ = generate_signal(row, asset_type="STOCK", sentiment=0.60, is_macro_bull=True, days_to_earnings=2)
+    assert "Bilanço Koruması" in dec_earn
+
+    dec_shock, _, _, risk_shock = generate_signal(row, asset_type="STOCK", sentiment=0.30, is_macro_bull=True, min_news_score=-0.85)
+    assert "Haber Şoku Kilidi" in dec_shock
+    assert risk_shock["shock_active"] is True
+    assert risk_shock["stop_loss"] == 97.0
+
+
 def test_position_sizing_respects_max_cap():
     row = {
         "close": 100.0,

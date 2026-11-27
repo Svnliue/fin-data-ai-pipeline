@@ -1,5 +1,7 @@
+from datetime import datetime, date, timezone
 import polars as pl
 import torch
+import yfinance as yf
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from db import get_db_connection
 from logger import get_logger
@@ -15,10 +17,15 @@ from config import (
 
 log = get_logger("signal_engine")
 
+EARNINGS_BLACKOUT_DAYS = 3
+SHOCK_NEWS_THRESHOLD = -0.75
+SHOCK_VOL_RATIO = 2.5
+
 
 def load_prices_df() -> pl.DataFrame:
     query = """
         SELECT symbol, price_date,
+               open_price::float AS high_open,
                high_price::float AS high,
                low_price::float AS low,
                close_price::float AS close,
@@ -31,7 +38,7 @@ def load_prices_df() -> pl.DataFrame:
             cur.execute(query)
             rows = cur.fetchall()
 
-    return pl.DataFrame(rows, schema=["symbol", "price_date", "high", "low", "close", "volume"], orient="row")
+    return pl.DataFrame(rows, schema=["symbol", "price_date", "open", "high", "low", "close", "volume"], orient="row")
 
 
 def get_benchmark_metrics(df: pl.DataFrame) -> tuple[bool, float, float, float]:
@@ -87,7 +94,10 @@ def compute_technical_and_risk(df: pl.DataFrame, symbols: list[str], qqq_ret_20d
     return df.group_by("symbol").last().sort("symbol")
 
 
-def compute_finbert_sentiment(symbols: list[str]) -> dict[str, tuple[float, int]]:
+def compute_finbert_sentiment(symbols: list[str]) -> dict[str, tuple[float, float, int]]:
+    """
+    Donus: {symbol: (ortalama_skor, en_dusuk_tekil_skor, haber_sayisi)}
+    """
     log.info(f"FinBERT Finansal Duygu Modeli Yükleniyor ({FINBERT_MODEL})")
     tokenizer = AutoTokenizer.from_pretrained(FINBERT_MODEL)
     model = AutoModelForSequenceClassification.from_pretrained(FINBERT_MODEL)
@@ -117,12 +127,41 @@ def compute_finbert_sentiment(symbols: list[str]) -> dict[str, tuple[float, int]
         scores_by_symbol[symbol].append(net_score)
 
     return {
-        sym: (round(sum(vals) / len(vals), 3), len(vals)) if vals else (0.0, 0)
+        sym: (round(sum(vals) / len(vals), 3), round(min(vals), 3), len(vals)) if vals else (0.0, 0.0, 0)
         for sym, vals in scores_by_symbol.items()
     }
 
 
-def generate_signal(row: dict, asset_type: str, sentiment: float, is_macro_bull: bool) -> tuple[str, float, list[str], dict]:
+def get_days_to_earnings(symbol: str, asset_type: str) -> int | None:
+    if asset_type != "STOCK":
+        return None
+    try:
+        cal = yf.Ticker(symbol).calendar
+        if not cal or "Earnings Date" not in cal:
+            return None
+        edates = cal["Earnings Date"]
+        if not edates:
+            return None
+        next_edate = edates[0]
+        if isinstance(next_edate, datetime):
+            next_edate = next_edate.date()
+        if isinstance(next_edate, date):
+            today = datetime.now(timezone.utc).date()
+            diff = (next_edate - today).days
+            return diff if diff >= 0 else None
+    except Exception:
+        return None
+    return None
+
+
+def generate_signal(
+    row: dict,
+    asset_type: str,
+    sentiment: float,
+    is_macro_bull: bool,
+    min_news_score: float = 0.0,
+    days_to_earnings: int | None = None,
+) -> tuple[str, float, list[str], dict]:
     profile = ASSET_PROFILES.get(asset_type, ASSET_PROFILES["STOCK"])
     close = row["close"]
     sma20 = row["sma_20"]
@@ -132,6 +171,7 @@ def generate_signal(row: dict, asset_type: str, sentiment: float, is_macro_bull:
     atr = row["atr_14"] or (close * 0.02)
     vol_ratio = row["vol_ratio"] or 1.0
     rs_pct = row["rs_vs_qqq_pct"] or 0.0
+    delta = row.get("delta") or 0.0
 
     is_stock_bull = (close >= sma200) if sma200 is not None else True
 
@@ -182,11 +222,22 @@ def generate_signal(row: dict, asset_type: str, sentiment: float, is_macro_bull:
     else:
         reasons.append(f"FinBERT nötr ({sentiment:+.2f})")
 
+    # Olağanüstü Haber & Hacim Şoku Kontrolü
+    news_shock = min_news_score <= SHOCK_NEWS_THRESHOLD
+    vol_price_shock = (vol_ratio >= SHOCK_VOL_RATIO) and (delta <= -2.5 * atr)
+    shock_active = news_shock or vol_price_shock
+
     hard_lock_reasons = []
     if profile["require_macro_bull"] and not is_macro_bull:
         hard_lock_reasons.append("QQQ < SMA200 Makro Ayı Rejimi")
     if profile["require_stock_sma200"] and not is_stock_bull:
         hard_lock_reasons.append(f"Varlık < SMA200 (${sma200:.2f})")
+    if days_to_earnings is not None and days_to_earnings <= EARNINGS_BLACKOUT_DAYS:
+        hard_lock_reasons.append(f"Bilanço Koruması ({days_to_earnings} gün kaldı)")
+    if news_shock:
+        hard_lock_reasons.append(f"Haber Şoku Kilidi (Min FinBERT: {min_news_score:+.2f})")
+    if vol_price_shock:
+        hard_lock_reasons.append(f"Hacim/Fiyat Şoku ({vol_ratio:.1f}x hacim)")
 
     if score >= 2.25:
         decision = "GÜÇLÜ AL" if not hard_lock_reasons else f"BEKLE (KİLİTLİ: {' + '.join(hard_lock_reasons)})"
@@ -199,7 +250,9 @@ def generate_signal(row: dict, asset_type: str, sentiment: float, is_macro_bull:
     else:
         decision = "BEKLE / TUT"
 
-    stop_loss = max(0.01, close - (profile["sl_atr"] * atr))
+    # Şok varsa açık pozisyonlar için stop mesafesi 0.75 ATR'ye sıkılaştırılır
+    effective_sl_mult = 0.75 if shock_active else profile["sl_atr"]
+    stop_loss = max(0.01, close - (effective_sl_mult * atr))
     partial_tp = close + (profile["tp1_atr"] * atr)
     take_profit = close + (profile["tp2_atr"] * atr)
     risk_per_share = max(0.01, close - stop_loss)
@@ -212,6 +265,8 @@ def generate_signal(row: dict, asset_type: str, sentiment: float, is_macro_bull:
     risk_plan = {
         "asset_type": asset_type,
         "max_hold": profile["max_hold_days"],
+        "shock_active": shock_active,
+        "days_to_earnings": days_to_earnings,
         "sma_200": round(sma200, 2) if sma200 else 0.0,
         "atr": round(atr, 2),
         "stop_loss": round(stop_loss, 2),
@@ -254,27 +309,33 @@ def main():
     regime_label = "BOĞA REJİMİ (Hisse Kilidi Açık)" if is_macro_bull else "AYI REJİMİ (STOCK Kilidi Aktif | COMMODITY/ETF Bağımsız)"
     log.info(f"Makro Rejim [{BENCHMARK_SYMBOL}]: ${qqq_close:.2f} vs SMA-200 ${qqq_sma200:.2f} -> {regime_label}")
 
-    print("\n" + "=" * 96)
-    print("ALPHA ENGINE v4.7 VARLIK SINIFI DUYARLI (STOCK / COMMODITY / LEVERAGED) SİNYAL RAPORU")
+    print("\n" + "=" * 100)
+    print("ALPHA ENGINE v4.8 SİNYAL RAPORU [VARLIK SINIFI + BİLANÇO KORUMASI + HABER/HACİM ŞOKU KİLİDİ]")
     print(f"MAKRO REJİM [{BENCHMARK_SYMBOL}]: ${qqq_close:.2f} vs SMA-200 ${qqq_sma200:.2f} -> {regime_label}")
-    print("=" * 96)
+    print("=" * 100)
 
     for row in tech_df.iter_rows(named=True):
         sym = row["symbol"]
         atype = asset_map.get(sym, "STOCK")
-        sent_score, _ = sentiment_map.get(sym, (0.0, 0))
-        decision, total_score, reasons, risk = generate_signal(row, atype, sent_score, is_macro_bull)
+        sent_score, min_sent, _ = sentiment_map.get(sym, (0.0, 0.0, 0))
+        earnings_days = get_days_to_earnings(sym, atype)
+        decision, total_score, reasons, risk = generate_signal(
+            row, atype, sent_score, is_macro_bull, min_news_score=min_sent, days_to_earnings=earnings_days
+        )
         persist_signal(sym, decision, total_score, row["close"], risk, sent_score)
 
         hold_note = f" | Max Süre: {risk['max_hold']} gün" if risk["max_hold"] else ""
-        print(f"\n[{sym} | {atype}] KARAR: {decision} (Güven Skoru: {total_score:+.2f})")
+        shock_note = " [ŞOK: SIKI STOP 0.75x ATR]" if risk["shock_active"] else ""
+        earn_note = f" | Bilanço: {earnings_days}g" if earnings_days is not None else ""
+
+        print(f"\n[{sym} | {atype}] KARAR: {decision} (Güven Skoru: {total_score:+.2f}){earn_note}")
         print(f"  - Fiyat: ${row['close']:.2f} | SMA-50: ${row['sma_50']:.2f} | SMA-200: ${risk['sma_200']:.2f} | RSI-14: {row['rsi_14']:.1f}")
-        print(f"  - ATR-14: ${risk['atr']:.2f} | SL: ${risk['stop_loss']:.2f} | TP-1 (%50+Breakeven): ${risk['partial_tp']:.2f} | TP-2: ${risk['take_profit']:.2f}{hold_note}")
+        print(f"  - ATR-14: ${risk['atr']:.2f} | SL: ${risk['stop_loss']:.2f}{shock_note} | TP-1 (%50+Breakeven): ${risk['partial_tp']:.2f} | TP-2: ${risk['take_profit']:.2f}{hold_note}")
         print(f"  - Volatilite Bazlı Lot ($10k kasa, %1 risk): {risk['shares']} adet (~${risk['position_usd']:.2f})")
         print(f"  - Puan Detayı: {' | '.join(reasons)}")
 
     print("\n[DB] Tüm sinyaller PostgreSQL signal_history tablosuna kaydedildi.")
-    print("=" * 96)
+    print("=" * 100)
 
 
 if __name__ == "__main__":
