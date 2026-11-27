@@ -1,5 +1,10 @@
+import os
+import sys
 from datetime import date, timedelta
 import polars as pl
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
+
 from signal_engine import compute_technical_and_risk, generate_signal
 
 
