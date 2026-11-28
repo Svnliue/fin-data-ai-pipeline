@@ -97,4 +97,4 @@ def get_active_symbols() -> list[str]:
     return list(get_active_asset_map().keys())
 
 
-SYMBOLS = get_active_symbols()
+SYMBOLS = DEFAULT_SYMBOLS

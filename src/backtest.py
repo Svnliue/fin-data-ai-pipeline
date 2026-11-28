@@ -1,5 +1,4 @@
 from datetime import date, timedelta
-from datetime import date, timedelta
 import math
 import polars as pl
 from indicators import add_technical_indicators, compute_tech_score
@@ -74,7 +73,7 @@ def _simulate_slice(rows: list[dict], asset_type: str) -> dict:
             max_hold = profile["max_hold_days"]
 
             # Trailing stop guncelle (asla dusmez)
-            trail_cand = close_px - (profile["sl_atr"] * pos["initial_atr"])
+            trail_cand = close_px - (profile["sl_atr"] * float(atr))
             if trail_cand > pos["sl"]:
                 pos["sl"] = trail_cand
 
@@ -251,7 +250,7 @@ def run_portfolio_simulation(prepared: dict[str, list[dict]], asset_map: dict[st
             days_held = (dt - pos["entry_date"]).days
             max_hold = profile["max_hold_days"]
 
-            trail_cand = close_px - (profile["sl_atr"] * pos["initial_atr"])
+            trail_cand = close_px - (profile["sl_atr"] * float(atr))
             if trail_cand > pos["sl"]:
                 pos["sl"] = trail_cand
 
@@ -339,7 +338,6 @@ def run_portfolio_simulation(prepared: dict[str, list[dict]], asset_map: dict[st
 
 def run_backtest() -> tuple[list[dict], dict]:
     asset_map = get_active_asset_map()
-    symbols = list(asset_map.keys()) + [BENCHMARK_SYMBOL]
     raw_df = load_prices_df()
     prepared, _ = _prepare_all_symbols(raw_df, asset_map)
 
