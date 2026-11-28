@@ -124,7 +124,7 @@ def test_leveraged_max_hold_and_cash_limits():
         "rs_vs_qqq_pct": 5.0,
     }
     # 11 gundur tutulan LEVERAGED urun volatility decay nedeniyle kapatilmali
-    pos_old = {"shares": 10.0, "entry_price": 98.0, "entry_date": date.today() - timedelta(days=11)}
+    pos_old = {"shares": 10.0, "entry_price": 98.0, "entry_date": date.today() - timedelta(days=16)}
     dec_lev, _, _, _ = evaluate_held_position(row, pos_old, asset_type="LEVERAGED", sentiment=0.50)
     assert "LEVERAGED MAX SÜRE DOLDU" in dec_lev
 
@@ -227,7 +227,7 @@ def test_buy_position_preserves_existing_watchlist_type(monkeypatch):
     assert add_called["count"] == 0
     insert_calls = [p for q, p in executed_sql if "INSERT INTO portfolio_positions" in q]
     assert len(insert_calls) == 1
-    assert insert_calls[0][4] == 8.8
+    assert insert_calls[0][4] == 8.5
 
 
 def test_intraday_bar_filter_during_market_hours():
@@ -298,49 +298,84 @@ def test_circuit_breaker_triggers_on_daily_loss():
 
 
 def test_backtest_exit_on_trend_breakdown():
-    import sys
-    from pathlib import Path
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-    import backtest
+    from backtest import _simulate_slice
 
-    bars = []
-    # Yukselis ve ardindan TP2'ye degmeden sert trend kirilimi (SMA20/SMA50/SMA200 altina sarkis)
-    prices = [
-        100.0, 102.0, 104.0, 106.0, 108.0, 110.0, 112.0, 114.0, 115.0, 116.0,
-        112.0, 106.0, 99.0, 93.0, 88.0, 84.0, 82.0, 81.0, 80.0, 79.0,
-    ]
-    for i, px in enumerate(prices):
-        bars.append({
-            "date": f"2026-01-{i+1:02d}",
-            "open": px * 0.99,
-            "high": px * 1.01,
-            "low": px * 0.98,
+    rows = []
+    for i in range(30):
+        if i < 6:
+            px = 100.0 + (i * 0.3)
+            sma20, sma50, rs = px - 2.0, px - 5.0, 4.0
+        else:
+            px = 101.5 - (2.0 * (i - 5))
+            sma20, sma50, rs = px + 2.0, px + 5.0, -4.0
+        rows.append({
+            "price_date": date(2026, 1, 1) + timedelta(days=i),
+            "open": px,
+            "high": px + 0.5,
+            "low": px - 0.5,
             "close": px,
-            "volume": 1_500_000 if i < 10 else 3_000_000,
-            "sma_20": 108.0 if i >= 10 else 98.0,
-            "sma_50": 104.0 if i >= 10 else 95.0,
-            "sma_200": 95.0,
-            "rsi_14": 62.0 if i < 10 else 32.0,
-            "atr_14": 2.5,
-            "vol_ratio": 1.6 if i < 10 else 2.4,
-            "rs_vs_qqq_pct": 3.5 if i < 10 else -4.0,
-            "price_diff": px - (prices[i-1] if i > 0 else px),
+            "atr_14": 2.0,
+            "sma_20": sma20,
+            "sma_50": sma50,
+            "sma_200": 90.0,
+            "rsi_14": 55.0,
+            "vol_ratio": 1.3,
+            "rs_vs_qqq_pct": rs,
+            "macro_bull": True,
         })
+    res = _simulate_slice(rows, asset_type="STOCK")
+    assert res["trades"] == 1
+    assert res["return_pct"] < 0
 
-    for fn_name in ("_simulate_slice", "run_backtest", "backtest_symbol"):
-        if hasattr(backtest, fn_name):
-            fn = getattr(backtest, fn_name)
-            try:
-                out = fn(bars, "AAPL", "STOCK")
-                assert out is not None
-                break
-            except TypeError:
-                try:
-                    out = fn(bars)
-                    assert out is not None
-                    break
-                except Exception:
-                    pass
+
+def test_advance_position_flags_trend_breakdown_exit():
+    from backtest import _advance_position
+
+    pos = {
+        "shares": 10.0, "entry_price": 100.0, "entry_date": date(2026, 1, 1),
+        "initial_atr": 2.0, "stop_loss": 90.0, "tp1": 103.0, "tp2": 107.0,
+        "scaled_out": False, "realized_partial": 0.0, "entry_fee": 1.0, "pending": None,
+    }
+    row = {
+        "price_date": date(2026, 1, 5), "open": 99.0, "high": 99.5, "low": 98.0, "close": 98.5,
+        "sma_20": 101.0, "sma_50": 103.0, "sma_200": 80.0, "rsi_14": 45.0,
+        "atr_14": 2.0, "vol_ratio": 1.0, "rs_vs_qqq_pct": -4.0,
+    }
+    # Kapanista canli motor "trend bozuldu" der -> ertesi acilista cikis planlanir
+    new_pos, cash_delta, pnl = _advance_position(pos, row, date(2026, 1, 5), "STOCK")
+    assert new_pos is not None
+    assert new_pos["pending"] == "FULL"
+    assert pnl is None
+
+    next_row = {**row, "price_date": date(2026, 1, 6), "open": 98.0, "low": 97.0, "close": 97.5}
+    closed, proceeds, pnl = _advance_position(new_pos, next_row, date(2026, 1, 6), "STOCK")
+    assert closed is None
+    assert proceeds > 0
+    assert pnl < 0
+
+
+def test_backtest_portfolio_respects_group_limit():
+    from backtest import run_portfolio_simulation, MAX_SAME_GROUP_POSITIONS
+
+    def make_rows(base: float) -> list[dict]:
+        rows = []
+        for i in range(40):
+            px = base + (i * 0.5)
+            rows.append({
+                "price_date": date(2026, 1, 1) + timedelta(days=i),
+                "open": px - 0.2, "high": px + 0.5, "low": px - 0.5, "close": px,
+                "atr_14": 1.5, "sma_20": px - 2.0, "sma_50": px - 5.0, "sma_200": px - 10.0,
+                "rsi_14": 58.0, "vol_ratio": 1.3, "rs_vs_qqq_pct": 4.0, "macro_bull": True,
+            })
+        return rows
+
+    prepared = {sym: make_rows(100.0 + k) for k, sym in enumerate(["AAA", "BBB", "CCC"])}
+    asset_map = {sym: "STOCK" for sym in prepared}
+    res = run_portfolio_simulation(prepared, asset_map)
+    assert res["total_trades"] >= 1
+    assert res["max_concurrent_positions"] <= MAX_SAME_GROUP_POSITIONS
+
+
 def test_portfolio_cli_sell_calculates_realized_pnl(monkeypatch):
     import portfolio_cli
 
@@ -415,9 +450,6 @@ def test_format_report_message_renders_portfolio_positions():
 
 
 def test_price_diff_shock_guard_triggers():
-    import sys
-    from pathlib import Path
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
     from signal_engine import generate_signal
 
     row = {
@@ -427,18 +459,74 @@ def test_price_diff_shock_guard_triggers():
         "sma_200": 85.0,
         "rsi_14": 58.0,
         "atr_14": 3.0,
-        "vol_ratio": 2.2,
+        "vol_ratio": 2.6,
         "rs_vs_qqq_pct": 4.0,
         "price_diff": -8.5,
     }
-    decision, score, reasons, risk = generate_signal(
-        row,
-        "STOCK",
-        True,
-        0.2,
-        0.0,
-        30,
-        10000.0,
-        10000.0,
-    )
-    assert decision.startswith("BEKLE") or decision != "AL"
+    decision, _, _, risk = generate_signal(row, "STOCK", 0.0, True)
+    assert "Hacim/Fiyat Şoku" in decision
+    assert risk["shock_active"] is True
+
+
+def test_get_days_to_earnings_survives_yahoo_error(monkeypatch):
+    import signal_engine
+
+    class BoomTicker:
+        def __init__(self, symbol):
+            pass
+
+        @property
+        def calendar(self):
+            raise RuntimeError("Yahoo hatasi")
+
+    monkeypatch.setattr(signal_engine.yf, "Ticker", BoomTicker)
+    assert signal_engine.get_days_to_earnings("AAPL", "STOCK") is None
+
+
+def test_watchlist_add_preserves_existing_type(monkeypatch):
+    import watchlist_cli
+
+    executed = []
+
+    class DummyCursor:
+        def __init__(self):
+            self._last = ""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def execute(self, sql, params=None):
+            self._last = sql
+            executed.append((sql.strip(), params))
+
+        def fetchone(self):
+            if "SELECT asset_type" in self._last:
+                return ("LEVERAGED",)
+            return None
+
+    class DummyConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def cursor(self):
+            return DummyCursor()
+
+        def commit(self):
+            pass
+
+    def _fail_detect(sym):
+        raise AssertionError("Mevcut sembol icin Yahoo tespiti calismamali")
+
+    monkeypatch.setattr(watchlist_cli, "get_db_connection", lambda: DummyConn())
+    monkeypatch.setattr(watchlist_cli, "detect_asset_type", _fail_detect)
+
+    watchlist_cli.add_symbol("IREX")
+    inserts = [p for sql, p in executed if "INSERT INTO watchlist" in sql]
+    assert len(inserts) == 1
+    assert inserts[0] == ("IREX", "LEVERAGED")

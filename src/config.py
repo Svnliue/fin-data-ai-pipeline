@@ -32,37 +32,36 @@ ASSET_PROFILES = {
     "STOCK": {
         "require_macro_bull": True,
         "require_stock_sma200": True,
-        "sl_atr": 2.0,
-        "tp1_atr": 1.5,
-        "tp2_atr": 3.5,
+        "sl_atr": 2.5,
+        "tp1_atr": 2.0,
+        "tp2_atr": 4.5,
         "max_hold_days": None,
     },
     "COMMODITY": {
         "require_macro_bull": False,
         "require_stock_sma200": True,
-        "sl_atr": 2.0,
-        "tp1_atr": 1.5,
-        "tp2_atr": 3.5,
+        "sl_atr": 2.5,
+        "tp1_atr": 2.0,
+        "tp2_atr": 4.5,
         "max_hold_days": None,
     },
     "SECTOR_ETF": {
         "require_macro_bull": False,
         "require_stock_sma200": True,
-        "sl_atr": 2.0,
-        "tp1_atr": 1.5,
-        "tp2_atr": 3.5,
+        "sl_atr": 2.5,
+        "tp1_atr": 2.0,
+        "tp2_atr": 4.5,
         "max_hold_days": None,
     },
     "LEVERAGED": {
         "require_macro_bull": False,
         "require_stock_sma200": False,
-        "sl_atr": 1.2,
-        "tp1_atr": 1.2,
+        "sl_atr": 1.5,
+        "tp1_atr": 1.5,
         "tp2_atr": 2.5,
-        "max_hold_days": 10,
+        "max_hold_days": 15,
     },
 }
-
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 FINBERT_MODEL = "ProsusAI/finbert"
 
