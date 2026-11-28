@@ -21,20 +21,20 @@
 
 ### 1. Veri Katmanı ve Kalite Koruması (`src/fetch_prices.py`, `src/fetch_news.py`)
 * `yfinance` ve `Polars` ile **5 yıllık (`5y`)** günlük OHLCV fiyat verileri çekilir; ağ hatalarında üstel geri çekilme (exponential backoff) uygulanır.
-* Tüm sembollerin başarısız olması (`total_records == 0`) durumunda boru hattı hata fırlatarak durur; 5 günden eski bayat fiyat barları loglanır.
+* NYSE seansı açıkken oluşan yarım günlük barlar filtrelenir; tüm sembollerin başarısız olması (`total_records == 0`) durumunda boru hattı hata fırlatarak durur ve 5 günden eski bayat fiyat barları loglanır.
 * Haberler vektörleştirilmeden (`sentence-transformers/all-MiniLM-L6-v2`) önce mevcut URL kontrolüyle filtrelenir; yinelenen haberler modeli gereksiz yere çalıştırmaz.
 
 ### 2. Veritabanı ve Numaralı Migration Sistemi (`docker/init.sql`, `migrations/`, `src/migrate.py`)
-* PostgreSQL 16 + `pgvector` HNSW indeksi üzerinde çalışır.
+* PostgreSQL 16 + `pgvector` HNSW indeksi üzerinde çalışır; port yerel arayüzle (`127.0.0.1:5433:5432`) sınırlandırılmıştır ve hassas dosyalar `.dockerignore` ile imaj dışında tutulur.
 * `migrations/001_portfolio_and_trades.sql` ve `migrations/002_news_score_and_outcomes.sql` dosyaları `schema_migrations` tablosu üzerinden izlenerek güvenli ve tekrarlanabilir şekilde uygulanır.
 
 ### 3. FinBERT Duygu Önbelleği (`ProsusAI/finbert`)
 * Son 7 günün haberleri analiz edilirken yalnızca `market_news.finbert_score IS NULL` olan yeni haberler FinBERT modelinden geçirilir ve net skor veritabanına kaydedilir; önceden skorlanmış haberler önbellekten okunur.
 
 ### 4. Varlık Sınıfına Duyarlı Karar ve Risk Motoru (`src/signal_engine.py`, `src/indicators.py`)
-* **STOCK:** Makro rejim filtresi (`QQQ >= SMA-200`), `Fiyat >= SMA-200`, 3 günlük bilanço koruması, haber/hacim şok kilitleri ve dinamik ATR risk planı (`SL: 2.0x ATR`, `TP-1: 1.5x ATR`, `TP-2: 3.5x ATR`).
-* **COMMODITY / SECTOR_ETF:** Makro hisse ayı rejiminden bağımsız değerlendirilir (`GLD`, `XLE` vb.).
-* **LEVERAGED:** Sıkı stop (`1.2x ATR`), hızlı hedefler (`1.2x / 2.5x ATR`) ve 10 takvim günü maksimum elde tutma koruması (`IREX` vb.).
+* **STOCK:** Makro rejim filtresi (`QQQ >= SMA-200`), `Fiyat >= SMA-200`, 3 günlük bilanço koruması, haber ve hacim/fiyat (`price_diff`) şok kilitleri ve dinamik ATR risk planı (`SL: 2.5x ATR`, `TP-1: 2.0x ATR`, `TP-2: 4.5x ATR`).
+* **COMMODITY / SECTOR_ETF:** Makro hisse ayı rejiminden bağımsız değerlendirilir (`GLD`, `XLE` vb.; `SL: 2.5x ATR`, `TP-1: 2.0x ATR`, `TP-2: 4.5x ATR`).
+* **LEVERAGED:** Sıkı stop (`1.5x ATR`), hedefler (`1.5x / 2.5x ATR`) ve 15 takvim günü maksimum elde tutma koruması (`IREX` vb.).
 
 ### 5. Portföy Yönetimi, Trailing Stop ve İşlem Defteri (`src/portfolio_cli.py`)
 * Açık pozisyonlarda yükselen **Trailing Stop** uygulanır (stop seviyesi asla aşağı çekilmez).
@@ -43,11 +43,11 @@
 
 ### 6. İki Dönemli Rejim Doğrulama Backtesti (`src/backtest.py`)
 * 200-bar teknik gösterge ısınma (warm-up) süresinin ardından sinyalin üretildiği günün ertesi iş günü açılışından (**next-open**) slippage ve komisyon dahil işlem açar.
-* **Win Rate, Profit Factor, Sharpe Ratio, Expectancy ($)** ve **Max Drawdown** metriklerini iki ayrı piyasa döneminde raporlar.
+* **Win Rate, Profit Factor, Sharpe Ratio, Expectancy ($)** ve **Max Drawdown** metriklerini ortak kasalı portföy ve iki ayrı piyasa döneminde raporlar.
 
 ### 7. Forward-Test Sonuç Takibi, Telegram Uyarısı ve NYSE Zamanlayıcı (`src/notifier.py`, `src/scheduler.py`)
 * `signal_history` tablosuna gerçek fiyat barı tarihi (`bar_date`) yazılır ve geçmiş sinyallerin 5 ve 10 işlem günü sonraki gerçek getirileri (`outcome_5d_pct`, `outcome_10d_pct`) otomatik güncellenir.
-* `.env` içerisinde `TELEGRAM_BOT_TOKEN` ve `TELEGRAM_CHAT_ID` tanımlıysa aksiyon gerektiren sinyaller Telegram üzerinden iletilir.
+* `.env` içerisinde `TELEGRAM_BOT_TOKEN` ve `TELEGRAM_CHAT_ID` tanımlıysa aksiyon gerektiren sinyaller ve zamanlayıcı boru hattı hataları Telegram üzerinden iletilir.
 * `scheduler.py` hafta sonlarını ve ABD NYSE resmi tatillerini atlayarak `SCHEDULE_TIME` (`America/New_York`) saatinde tam boru hattını çalıştırır.
 
 ## Proje Dizin Yapısı
@@ -58,6 +58,9 @@
     ├── migrations/
     │   ├── 001_portfolio_and_trades.sql
     │   └── 002_news_score_and_outcomes.sql
+    ├── scripts/
+    │   ├── ablation.py              # Kural/filtre etki analizi betiği
+    │   └── walk_forward_and_exits.py# 70/30 OOS ve çıkış parametresi tarama betiği
     ├── src/
     │   ├── config.py                # Varlık profilleri, risk limitleri ve dinamik watchlist
     │   ├── db.py                    # PostgreSQL bağlantı yöneticisi
@@ -73,7 +76,9 @@
     │   ├── pipeline_runner.py       # Uçtan uca ana boru hattı orkestratörü
     │   └── scheduler.py             # NYSE tatil duyarlı otonom zamanlayıcı
     ├── tests/
-    │   └── test_engine.py           # Birim ve entegrasyon test paketi (18 test)
+    │   └── test_engine.py           # Birim ve entegrasyon test paketi (22 test)
+    ├── .dockerignore
+    ├── .env.example
     ├── docker-compose.yml
     ├── requirements.txt
     └── README.md
@@ -110,7 +115,7 @@
     # İzleme listesini yönet
     python src/watchlist_cli.py list
     python src/watchlist_cli.py add AMD
-    python src/watchlist_cli.py type IREX LEVERAGED
+    python src/watchlist_cli.py add IREX LEVERAGED
 
 ## Doğrulama ve Testler
 
