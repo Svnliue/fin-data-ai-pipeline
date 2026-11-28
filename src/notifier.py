@@ -78,3 +78,13 @@ def send_telegram_message(text: str) -> bool:
 def notify_report(report: dict) -> bool:
     msg = format_report_message(report)
     return send_telegram_message(msg)
+
+
+def format_alert_message(report: dict) -> str:
+    return format_report_message(report)
+
+
+def send_telegram_alert(payload) -> bool:
+    if isinstance(payload, dict):
+        return send_telegram_message(format_report_message(payload))
+    return send_telegram_message(str(payload))
