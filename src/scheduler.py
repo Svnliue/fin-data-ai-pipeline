@@ -1,3 +1,4 @@
+from notifier import send_telegram_alert
 import time
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
@@ -78,6 +79,10 @@ def job() -> None:
     try:
         run_full_pipeline(skip_fetch=False, notify=True)
     except Exception as exc:
+        try:
+            send_telegram_alert(f"Pipeline hatası: {exc}")
+        except Exception as notify_exc:
+            log.error(f"Hata bildirimi gonderilemedi: {notify_exc}")
         log.error(f"Zamanlanmis gorev hatasi: {exc}", exc_info=True)
 
 

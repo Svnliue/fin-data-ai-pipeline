@@ -1,3 +1,4 @@
+from signal_engine import generate_signal, evaluate_held_position
 from datetime import date, timedelta
 import math
 import polars as pl
@@ -364,7 +365,7 @@ def run_backtest() -> tuple[list[dict], dict]:
 def main():
     results, pf_sim = run_backtest()
     print("\n" + "=" * 112)
-    print("İKİ DÖNEMLİ REJİM DOĞRULAMA RAPORU (NEXT-OPEN + SLIPPAGE + CANLI ÇIKIŞ KURALLARI | 200-BAR WARM-UP)")
+    print("İKİ DÖNEMLİ REJİM DOĞRULAMA RAPORU (NEXT-OPEN + SLIPPAGE + ORTAK KARAR MOTORU | 200-BAR WARM-UP)")
     print("=" * 112)
     for r in results:
         p1 = r["regime_a"]

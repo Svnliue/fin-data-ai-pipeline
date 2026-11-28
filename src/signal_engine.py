@@ -249,7 +249,8 @@ def get_days_to_earnings(symbol: str, asset_type: str) -> int | None:
             today = datetime.now(timezone.utc).date()
             diff = (next_edate - today).days
             return diff if diff >= 0 else None
-    except Exception:
+    except Exception as exc:
+        log.warning(f"Bilanco tarihi alinamadi ({sym}): {exc}")
         return None
     return None
 
@@ -329,7 +330,7 @@ def generate_signal(
     profile = ASSET_PROFILES.get(asset_type, ASSET_PROFILES["STOCK"])
     close = row["close"]
     sma200 = row.get("sma_200")
-    delta = row.get("delta") or 0.0
+    delta = row.get("price_diff") or 0.0
     is_stock_bull = (close >= sma200) if sma200 is not None else True
 
     score, reasons, atr, vol_ratio = _score_factors(row, asset_type, sentiment)
@@ -408,7 +409,7 @@ def evaluate_held_position(
     close = row["close"]
     sma20 = row.get("sma_20")
     sma200 = row.get("sma_200")
-    delta = row.get("delta") or 0.0
+    delta = row.get("price_diff") or 0.0
 
     entry_price = position["entry_price"]
     shares = position["shares"]
