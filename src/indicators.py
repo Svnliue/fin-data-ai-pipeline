@@ -46,3 +46,46 @@ def add_technical_indicators(df: pl.DataFrame, qqq_ret_df: pl.DataFrame | None =
             ((pl.col("ret_20d") - pl.col("qqq_ret_20d").fill_null(0.0)) * 100.0).alias("rs_vs_qqq_pct")
         )
     return sub
+
+
+def compute_tech_score(row: dict) -> tuple[float, list[str]]:
+    """Hem canli sinyal motoru hem de backtest icin ortak teknik puanlama fonksiyonu."""
+    close = float(row["close"])
+    sma_20 = float(row["sma_20"])
+    sma_50 = float(row["sma_50"])
+    rsi = float(row["rsi_14"])
+    vol_ratio = float(row.get("vol_ratio") or 1.0)
+    rs_qqq = float(row.get("rs_vs_qqq_pct") or 0.0)
+
+    score = 0.0
+    reasons = []
+
+    if close > sma_20 > sma_50:
+        score += 2.0
+        reasons.append("Kisa/Orta yukselis trendi (Fiyat > SMA20 > SMA50)")
+    elif close > sma_50:
+        score += 1.0
+        reasons.append("Orta vadeli trend pozitif (Fiyat > SMA50)")
+    elif close < sma_20 < sma_50:
+        score -= 2.0
+        reasons.append("Kisa/Orta dusus trendi (Fiyat < SMA20 < SMA50)")
+
+    if rs_qqq > 3.0:
+        score += 1.0
+        reasons.append(f"Endeks lideri (RS vs QQQ: {rs_qqq:+.1f}%)")
+    elif rs_qqq < -5.0:
+        score -= 1.0
+        reasons.append(f"Endeksten zayif (RS vs QQQ: {rs_qqq:+.1f}%)")
+
+    if vol_ratio >= 1.5 and close > sma_20:
+        score += 1.0
+        reasons.append(f"Yuksek hacim teyidi ({vol_ratio:.2f}x)")
+
+    if rsi >= 75.0:
+        score -= 1.0
+        reasons.append(f"RSI asiri alim ({rsi:.1f})")
+    elif rsi <= 35.0:
+        score += 0.5
+        reasons.append(f"RSI asiri satim ({rsi:.1f})")
+
+    return round(score, 2), reasons
