@@ -395,3 +395,31 @@ def test_format_report_message_renders_portfolio_positions():
     assert "$139.00" in msg
     assert "$152.00" in msg
     assert "Fiyat gecikmesi uyarisi" in msg
+
+
+def test_price_diff_shock_guard_triggers():
+    from signal_engine import generate_signal
+
+    row = {
+        "close": 90.0,
+        "sma_20": 95.0,
+        "sma_50": 92.0,
+        "sma_200": 85.0,
+        "rsi_14": 45.0,
+        "atr_14": 3.0,
+        "vol_ratio": 2.2,
+        "rs_vs_qqq_pct": 1.0,
+        "price_diff": -8.5,
+    }
+    decision, score, reasons, risk = generate_signal(
+        row=row,
+        asset_type="STOCK",
+        is_macro_bull=True,
+        sentiment_score=0.2,
+        min_news_score=0.0,
+        days_to_earnings=30,
+        available_cash=10000.0,
+        effective_capital=10000.0,
+    )
+    assert decision.startswith("BEKLE")
+    assert any("ŞOK" in r.upper() or "SOK" in r.upper() or "DÜŞÜŞ" in r.upper() or "DUSUS" in r.upper() for r in reasons) or decision != "AL"

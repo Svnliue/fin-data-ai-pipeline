@@ -1,4 +1,4 @@
-# Fin-Data AI Pipeline (Alpha Engine v4.9.9)
+# Fin-Data AI Pipeline (Alpha Engine v4.9.17)
 
 Çok varlıklı (**STOCK**, **COMMODITY**, **SECTOR_ETF**, **LEVERAGED**) kantitatif karar destek, portföy yönetim, finansal NLP duygu analizi ve rejim doğrulama boru hattı.
 
@@ -12,7 +12,7 @@
                                                             +------------+------------+
                                                                          |
     +-------------------+     +-----------------------+                  v
-    |  Telegram Bot     | <-- |  Alpha Engine v4.9.9  | <-- +-------------------------+
+    |  Telegram Bot     | <-- |  Alpha Engine v4.9.17  | <-- +-------------------------+
     |  & CLI Raporu     |     |  (Risk, Trailing SL,  |     |  ProsusAI/finbert       |
     +-------------------+     |   Forward-Test, OOS)  |     |  (DB Skor Önbelleği)    |
                               +-----------------------+     +-------------------------+
@@ -73,7 +73,7 @@
     │   ├── pipeline_runner.py       # Uçtan uca ana boru hattı orkestratörü
     │   └── scheduler.py             # NYSE tatil duyarlı otonom zamanlayıcı
     ├── tests/
-    │   └── test_engine.py           # Birim ve entegrasyon test paketi (10 test)
+    │   └── test_engine.py           # Birim ve entegrasyon test paketi (18 test)
     ├── docker-compose.yml
     ├── requirements.txt
     └── README.md

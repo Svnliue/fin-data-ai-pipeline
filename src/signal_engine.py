@@ -694,7 +694,7 @@ def main():
     regime_label = "BOĞA REJİMİ (Hisse Kilidi Açık)" if macro["is_bull"] else "AYI REJİMİ (STOCK Kilidi Aktif | COMMODITY/ETF Bağımsız)"
 
     print("\n" + "=" * 100)
-    print("ALPHA ENGINE v4.9.16 RAPORU [1. AÇIK POZİSYONLARIM  |  2. İZLEME LİSTESİ FIRSAT RADARI]")
+    print("ALPHA ENGINE v4.9.17 RAPORU [1. AÇIK POZİSYONLARIM  |  2. İZLEME LİSTESİ FIRSAT RADARI]")
     print(f"MAKRO REJİM [{macro['benchmark']}]: ${macro['close']:.2f} vs SMA-200 ${macro['sma_200']:.2f} -> {regime_label}")
     print(
         f"SERMAYE DURUMU: Efektif ${cap['effective_capital']:,.2f} (Realized PnL: ${cap['realized_pnl']:+,.2f}) | "
