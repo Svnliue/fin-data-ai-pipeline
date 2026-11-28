@@ -254,3 +254,37 @@ def test_circuit_breaker_triggers_on_drawdown():
     triggered, reason = evaluate_circuit_breaker(effective_capital=8500.0, daily_pnl=0.0, base_capital=10000.0)
     assert triggered is True
     assert "Drawdown" in reason
+
+
+def test_live_run_analysis_enforces_group_limit_and_keeps_risk_dict(monkeypatch):
+    from datetime import date
+    import polars as pl
+    import signal_engine
+
+    monkeypatch.setattr(signal_engine, "get_active_asset_map", lambda: {"NVDA": "STOCK"})
+    monkeypatch.setattr(signal_engine, "get_all_asset_map", lambda: {"AAPL": "STOCK", "MSFT": "STOCK", "NVDA": "STOCK"})
+    monkeypatch.setattr(signal_engine, "load_portfolio_positions", lambda: {
+        "AAPL": {"shares": 5, "entry_price": 100.0, "stop_loss": 95.0, "partial_tp": 105.0, "take_profit": 115.0, "scaled_out": False, "entry_date": date(2026, 11, 20), "initial_atr": 2.0},
+        "MSFT": {"shares": 5, "entry_price": 100.0, "stop_loss": 95.0, "partial_tp": 105.0, "take_profit": 115.0, "scaled_out": False, "entry_date": date(2026, 11, 20), "initial_atr": 2.0},
+    })
+    monkeypatch.setattr(signal_engine, "load_realized_pnl", lambda: 0.0)
+    monkeypatch.setattr(signal_engine, "load_daily_realized_pnl", lambda: 0.0)
+    monkeypatch.setattr(signal_engine, "load_prices_df", lambda: pl.DataFrame({"symbol": ["QQQ"], "price_date": [date(2026, 11, 27)], "close": [500.0]}))
+    monkeypatch.setattr(signal_engine, "get_benchmark_metrics", lambda df: (True, 500.0, 480.0, 0.03))
+    monkeypatch.setattr(signal_engine, "compute_finbert_sentiment", lambda syms: {"NVDA": (0.4, 0.1, 2)})
+    monkeypatch.setattr(signal_engine, "get_days_to_earnings", lambda sym, atype: None)
+
+    tech_rows = pl.DataFrame([
+        {"symbol": "AAPL", "price_date": date(2026, 11, 27), "close": 102.0, "sma_20": 100.0, "sma_50": 98.0, "sma_200": 90.0, "rsi_14": 55.0, "atr_14": 2.0, "vol_ratio": 1.1, "rs_vs_qqq_pct": 2.0},
+        {"symbol": "MSFT", "price_date": date(2026, 11, 27), "close": 102.0, "sma_20": 100.0, "sma_50": 98.0, "sma_200": 90.0, "rsi_14": 55.0, "atr_14": 2.0, "vol_ratio": 1.1, "rs_vs_qqq_pct": 2.0},
+        {"symbol": "NVDA", "price_date": date(2026, 11, 27), "close": 150.0, "sma_20": 145.0, "sma_50": 140.0, "sma_200": 120.0, "rsi_14": 60.0, "atr_14": 3.0, "vol_ratio": 1.6, "rs_vs_qqq_pct": 6.0},
+    ])
+    monkeypatch.setattr(signal_engine, "compute_technical_and_risk", lambda df, syms, qqq_ret: tech_rows)
+
+    res = signal_engine.run_analysis(persist=False)
+    radar_list = res.get("radar") or res.get("radar_results") or []
+    nvda = next(r for r in radar_list if r["symbol"] == "NVDA")
+    assert "STOCK Grup Limiti Dolu 2/2" in nvda["decision"]
+    assert nvda["risk"] is not None
+    assert nvda["risk"]["shares"] == 0
+    assert nvda["risk"]["position_usd"] == 0.0

@@ -601,6 +601,12 @@ def run_analysis(persist: bool = True) -> dict:
         })
 
     radar_results = []
+    cb_active, cb_reason = evaluate_circuit_breaker(effective_capital, load_daily_realized_pnl())
+    open_count = len(positions)
+    group_counts: dict[str, int] = {}
+    for p_sym in positions:
+        g = all_asset_map.get(p_sym, 'STOCK')
+        group_counts[g] = group_counts.get(g, 0) + 1
     for sym in [s for s in sorted(active_map.keys()) if s not in positions]:
         if sym not in rows_by_sym:
             msg = f"Izleme listesi sembolu {sym} icin fiyat verisi bulunamadi, analiz atlandi."
@@ -611,8 +617,6 @@ def run_analysis(persist: bool = True) -> dict:
         atype = active_map.get(sym, "STOCK")
         sent_score, min_sent, _ = sentiment_map.get(sym, (0.0, 0.0, 0))
         earnings_days = get_days_to_earnings(sym, atype)
-        same_group_count = sum(1 for p_sym in positions if all_asset_map.get(p_sym, 'STOCK') == atype)
-        cb_active, cb_reason = evaluate_circuit_breaker(effective_capital, load_daily_realized_pnl())
         decision, total_score, reasons, risk = generate_signal(
             row,
             atype,
@@ -624,15 +628,19 @@ def run_analysis(persist: bool = True) -> dict:
             open_positions_count=len(positions),
             effective_capital=effective_capital,
         )
-        if decision.startswith('AL ('):
+        if decision in ('AL', 'GÜÇLÜ AL'):
             if cb_active:
-                decision = f'BEKLE (KILITLI: {cb_reason})'
-                risk = None
-            elif same_group_count >= MAX_SAME_GROUP_POSITIONS:
-                decision = f'BEKLE (KILITLI: {asset_type} Grup Limiti Dolu {same_group_count}/{MAX_SAME_GROUP_POSITIONS})'
-                risk = None
-            elif risk:
+                decision = f'BEKLE (KİLİTLİ: {cb_reason})'
+            elif group_counts.get(atype, 0) >= MAX_SAME_GROUP_POSITIONS:
+                decision = f'BEKLE (KİLİTLİ: {atype} Grup Limiti Dolu {group_counts[atype]}/{MAX_SAME_GROUP_POSITIONS})'
+            elif open_count >= MAX_OPEN_POSITIONS:
+                decision = f'BEKLE (KİLİTLİ: Maksimum pozisyon {open_count}/{MAX_OPEN_POSITIONS})'
+            else:
                 available_cash = max(0.0, round(available_cash - risk['position_usd'], 2))
+                open_count += 1
+                group_counts[atype] = group_counts.get(atype, 0) + 1
+            if decision.startswith('BEKLE'):
+                risk = {**risk, 'shares': 0, 'position_usd': 0.0}
         if persist:
             persist_signal(sym, decision, total_score, row["close"], risk, sent_score, bar_date=row.get("price_date"))
         radar_results.append({
@@ -681,7 +689,7 @@ def main():
     regime_label = "BOĞA REJİMİ (Hisse Kilidi Açık)" if macro["is_bull"] else "AYI REJİMİ (STOCK Kilidi Aktif | COMMODITY/ETF Bağımsız)"
 
     print("\n" + "=" * 100)
-    print("ALPHA ENGINE v4.9.13 RAPORU [1. AÇIK POZİSYONLARIM  |  2. İZLEME LİSTESİ FIRSAT RADARI]")
+    print("ALPHA ENGINE v4.9.14 RAPORU [1. AÇIK POZİSYONLARIM  |  2. İZLEME LİSTESİ FIRSAT RADARI]")
     print(f"MAKRO REJİM [{macro['benchmark']}]: ${macro['close']:.2f} vs SMA-200 ${macro['sma_200']:.2f} -> {regime_label}")
     print(
         f"SERMAYE DURUMU: Efektif ${cap['effective_capital']:,.2f} (Realized PnL: ${cap['realized_pnl']:+,.2f}) | "
