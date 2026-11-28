@@ -34,7 +34,11 @@ def add_technical_indicators(df: pl.DataFrame, qqq_ret_df: pl.DataFrame | None =
         pl.when(pl.col("avg_loss") == 0)
         .then(100.0)
         .otherwise(100.0 - (100.0 / (1.0 + (pl.col("avg_gain") / pl.col("avg_loss")))))
-        .alias("rsi_14")
+        .alias("rsi_14"),
+        pl.when(pl.col("vol_sma_20") > 0)
+        .then(pl.col("volume").cast(pl.Float64) / pl.col("vol_sma_20"))
+        .otherwise(1.0)
+        .alias("vol_ratio"),
     ])
 
     if qqq_ret_df is not None and not qqq_ret_df.is_empty():

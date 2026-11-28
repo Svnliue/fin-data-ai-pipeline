@@ -1,3 +1,4 @@
+import atexit
 import os
 from contextlib import contextmanager
 from dotenv import load_dotenv
@@ -22,6 +23,7 @@ def get_pool() -> ConnectionPool:
     global _pool
     if _pool is None:
         _pool = ConnectionPool(conninfo=_build_conninfo(), min_size=1, max_size=5, open=True)
+        atexit.register(_pool.close)
     return _pool
 
 
