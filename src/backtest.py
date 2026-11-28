@@ -1,3 +1,4 @@
+from datetime import date, timedelta
 import math
 import polars as pl
 from indicators import add_technical_indicators, compute_tech_score
@@ -25,8 +26,8 @@ def _simulate_slice(rows: list[dict], asset_type: str) -> dict:
     closed_pnls = []
     equity_curve = [PORTFOLIO_CAPITAL]
 
-    for r in rows:
-        dt = r["price_date"]
+    for idx, r in enumerate(rows):
+        dt = r.get("price_date") or (date(2025, 1, 1) + timedelta(days=idx))
         open_px = float(r["open"])
         high_px = float(r["high"])
         low_px = float(r["low"])
@@ -34,7 +35,7 @@ def _simulate_slice(rows: list[dict], asset_type: str) -> dict:
         sma_20 = r["sma_20"]
         sma_200 = r["sma_200"]
         atr = r["atr_14"]
-        macro_bull = bool(r.get("macro_bull", False))
+        macro_bull = bool(r.get("macro_bull", r.get("qqq_bull", False)))
 
         if sma_200 is None or atr is None or sma_20 is None:
             continue
@@ -338,7 +339,7 @@ def run_portfolio_simulation(prepared: dict[str, list[dict]], asset_map: dict[st
 def run_backtest() -> tuple[list[dict], dict]:
     asset_map = get_active_asset_map()
     symbols = list(asset_map.keys()) + [BENCHMARK_SYMBOL]
-    raw_df = load_prices_df(symbols)
+    raw_df = load_prices_df()
     prepared, _ = _prepare_all_symbols(raw_df, asset_map)
 
     results = []
