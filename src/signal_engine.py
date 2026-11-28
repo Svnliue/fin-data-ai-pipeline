@@ -489,6 +489,28 @@ def evaluate_held_position(
     return decision, round(score, 2), reasons, risk_plan
 
 
+def load_daily_realized_pnl() -> float:
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COALESCE(SUM(realized_pnl), 0) FROM trades WHERE closed_at >= NOW() - INTERVAL '24 hours';")
+                val = cur.fetchone()
+                return float(val[0]) if val else 0.0
+    except Exception as exc:
+        log.error(f"Gunluk realized PnL okunamadi: {exc}")
+        return 0.0
+
+
+def evaluate_circuit_breaker(effective_capital: float, daily_pnl: float, base_capital: float = PORTFOLIO_CAPITAL) -> tuple[bool, str]:
+    dd_pct = (base_capital - effective_capital) / base_capital if base_capital > 0 else 0.0
+    if dd_pct >= MAX_DRAWDOWN_PCT:
+        return True, f"Max Drawdown Devre Kesici (-{dd_pct*100:.1f}% >= -{MAX_DRAWDOWN_PCT*100:.0f}%)"
+    daily_loss_pct = (-daily_pnl) / base_capital if base_capital > 0 else 0.0
+    if daily_loss_pct >= MAX_DAILY_LOSS_PCT:
+        return True, f"Gunluk Zarar Devre Kesici (-{daily_loss_pct*100:.1f}% >= -{MAX_DAILY_LOSS_PCT*100:.0f}%)"
+    return False, ""
+
+
 def _update_position_trailing_state(symbol: str, stop_loss: float, tp1: float, tp2: float) -> None:
     try:
         with get_db_connection() as conn:

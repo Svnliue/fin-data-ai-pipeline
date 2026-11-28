@@ -228,3 +228,29 @@ def test_buy_position_preserves_existing_watchlist_type(monkeypatch):
     insert_calls = [p for q, p in executed_sql if "INSERT INTO portfolio_positions" in q]
     assert len(insert_calls) == 1
     assert insert_calls[0][4] == 8.8
+
+
+def test_intraday_bar_filter_during_market_hours():
+    from datetime import datetime, date
+    from zoneinfo import ZoneInfo
+    import polars as pl
+    from fetch_prices import _filter_incomplete_intraday_bar
+
+    ny_tz = ZoneInfo("America/New_York")
+    # Cuma saat 11:30 ET (seans acik)
+    now_open = datetime(2026, 11, 27, 11, 30, tzinfo=ny_tz)
+    df = pl.DataFrame({
+        "symbol": ["AAPL", "AAPL"],
+        "price_date": [date(2026, 11, 26), date(2026, 11, 27)],
+        "close_price": [350.0, 355.0],
+    })
+    filtered = _filter_incomplete_intraday_bar(df, now_ny=now_open)
+    assert filtered.height == 1
+    assert filtered["price_date"].max() == date(2026, 11, 26)
+
+
+def test_circuit_breaker_triggers_on_drawdown():
+    from signal_engine import evaluate_circuit_breaker
+    triggered, reason = evaluate_circuit_breaker(effective_capital=8500.0, daily_pnl=0.0, base_capital=10000.0)
+    assert triggered is True
+    assert "Drawdown" in reason

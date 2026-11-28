@@ -211,6 +211,135 @@ def run_backtest() -> list[dict]:
     return results
 
 
+
+
+def run_portfolio_simulation(symbol_dfs: dict[str, pl.DataFrame], asset_map: dict[str, str], qqq_df: pl.DataFrame) -> dict:
+    """Ortak kasali coklu-sembol portfoy simulasyonu (MAX_OPEN_POSITIONS ve nakit paylasimi ile)."""
+    prepared = {}
+    qqq_prep = _prepare_symbol_df(qqq_df, qqq_df)
+    qqq_bull_map = dict(zip(qqq_prep["price_date"].to_list(), (qqq_prep["close_price"] >= qqq_prep["sma_200"]).to_list()))
+
+    all_dates = set()
+    for sym, df in symbol_dfs.items():
+        if sym == BENCHMARK_SYMBOL or df.height < 220:
+            continue
+        pdf = _prepare_symbol_df(df, qqq_df)
+        rows = pdf.to_dicts()
+        prepared[sym] = {r["price_date"]: r for r in rows}
+        all_dates.update(r["price_date"] for r in rows[200:])
+
+    sorted_dates = sorted(all_dates)
+    cash = PORTFOLIO_CAPITAL
+    positions = {}
+    pending_entries = {}
+    closed_pnls = []
+    equity_curve = [PORTFOLIO_CAPITAL]
+
+    for dt in sorted_dates:
+        macro_bull = bool(qqq_bull_map.get(dt, False))
+
+        # 1. Bekleyen ertesi gun acilis (next-open) girislerini uygula
+        for sym, entry_meta in list(pending_entries.items()):
+            row = prepared.get(sym, {}).get(dt)
+            if row and sym not in positions and len(positions) < MAX_OPEN_POSITIONS:
+                exec_px = float(row["open_price"]) * (1.0 + SLIPPAGE_PCT)
+                atr = entry_meta["atr"]
+                profile = entry_meta["profile"]
+                sl = exec_px - (profile["sl_atr"] * atr)
+                tp1 = exec_px + (profile["tp1_atr"] * atr)
+                tp2 = exec_px + (profile["tp2_atr"] * atr)
+                risk_per_share = max(exec_px - sl, 0.01)
+                shares = min((cash * RISK_PER_TRADE) / risk_per_share, (cash * MAX_POSITION_PCT) / exec_px)
+                cost = shares * exec_px * (1.0 + COMMISSION_RATE)
+                if shares > 0 and cost <= cash:
+                    cash -= cost
+                    positions[sym] = {
+                        "shares": shares,
+                        "entry_px": exec_px,
+                        "entry_date": dt,
+                        "sl": sl,
+                        "tp1": tp1,
+                        "tp2": tp2,
+                        "scaled_out": False,
+                        "profile": profile,
+                    }
+            pending_entries.pop(sym, None)
+
+        # 2. Acik pozisyonlari yonet
+        for sym in list(positions.keys()):
+            row = prepared.get(sym, {}).get(dt)
+            if not row:
+                continue
+            pos = positions[sym]
+            open_px = float(row["open_price"])
+            high_px = float(row["high_price"])
+            low_px = float(row["low_price"])
+            close_px = float(row["close_price"])
+            sma_20 = row["sma_20"]
+            score, _ = _compute_tech_score(row)
+            days_held = (dt - pos["entry_date"]).days
+            max_hold = pos["profile"]["max_hold_days"]
+
+            exit_px = None
+            if open_px <= pos["sl"]:
+                exit_px = open_px * (1.0 - SLIPPAGE_PCT)
+            elif low_px <= pos["sl"]:
+                exit_px = pos["sl"] * (1.0 - SLIPPAGE_PCT)
+            elif high_px >= pos["tp2"]:
+                exit_px = pos["tp2"] * (1.0 - SLIPPAGE_PCT)
+            elif max_hold is not None and days_held >= max_hold:
+                exit_px = close_px * (1.0 - SLIPPAGE_PCT)
+            elif sma_20 is not None and close_px < float(sma_20) and score < 0:
+                exit_px = close_px * (1.0 - SLIPPAGE_PCT)
+
+            if exit_px is not None:
+                proceeds = pos["shares"] * exit_px * (1.0 - COMMISSION_RATE)
+                pnl = proceeds - (pos["shares"] * pos["entry_px"])
+                cash += proceeds
+                closed_pnls.append(pnl)
+                del positions[sym]
+
+        # 3. Yeni giris sinyallerini topla
+        if len(positions) + len(pending_entries) < MAX_OPEN_POSITIONS:
+            for sym, date_map in prepared.items():
+                if sym in positions or sym in pending_entries:
+                    continue
+                row = date_map.get(dt)
+                if not row or row["sma_200"] is None or row["atr_14"] is None:
+                    continue
+                atype = asset_map.get(sym, "STOCK")
+                profile = ASSET_PROFILES.get(atype, ASSET_PROFILES["STOCK"])
+                if profile["require_macro_bull"] and not macro_bull:
+                    continue
+                if profile["require_stock_sma200"] and float(row["close_price"]) < float(row["sma_200"]):
+                    continue
+                score, _ = _compute_tech_score(row)
+                if score >= 2.0:
+                    pending_entries[sym] = {"atr": float(row["atr_14"]), "profile": profile}
+                    if len(positions) + len(pending_entries) >= MAX_OPEN_POSITIONS:
+                        break
+
+        mtm_val = cash + sum(
+            pos["shares"] * float(prepared[sym][dt]["close_price"])
+            for sym, pos in positions.items()
+            if dt in prepared.get(sym, {})
+        )
+        equity_curve.append(mtm_val)
+
+    total_ret = ((equity_curve[-1] - PORTFOLIO_CAPITAL) / PORTFOLIO_CAPITAL) * 100.0
+    wins = [p for p in closed_pnls if p > 0]
+    losses = [abs(p) for p in closed_pnls if p <= 0]
+    pf = (sum(wins) / sum(losses)) if losses else (99.0 if wins else 0.0)
+    win_rate = (len(wins) / len(closed_pnls) * 100.0) if closed_pnls else 0.0
+    return {
+        "final_equity": round(equity_curve[-1], 2),
+        "total_return_pct": round(total_ret, 2),
+        "total_trades": len(closed_pnls),
+        "win_rate": round(win_rate, 1),
+        "profit_factor": round(pf, 2),
+    }
+
+
 def main():
     results = run_backtest()
     print("\n" + "=" * 112)
@@ -226,6 +355,11 @@ def main():
             f"İşlem: {p2['trades']} | Win: %{p2['win_rate_pct']:.1f} | PF: {p2['profit_factor']:.2f} | "
             f"Sharpe: {p2['sharpe']:.2f} | Exp: ${p2['expectancy_usd']:+.2f} | MaxDD: {p2['max_dd_pct']:.2f}%"
         )
+    print("=" * 112)
+    pf_sim = run_portfolio_simulation(symbol_dfs, asset_map, qqq_df)
+    print(f"ORTAK KASALI PORTFÖY SİMÜLASYONU (Max {MAX_OPEN_POSITIONS} Pozisyon): "
+          f"Bitiş: ${pf_sim['final_equity']:,.2f} | Getiri: {pf_sim['total_return_pct']:+.2f}% | "
+          f"İşlem: {pf_sim['total_trades']} | Win: %{pf_sim['win_rate']:.1f} | PF: {pf_sim['profit_factor']:.2f}")
     print("=" * 112)
 
 
