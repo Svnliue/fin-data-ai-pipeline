@@ -610,7 +610,7 @@ def run_analysis(persist: bool = True) -> dict:
         atype = active_map.get(sym, "STOCK")
         sent_score, min_sent, _ = sentiment_map.get(sym, (0.0, 0.0, 0))
         earnings_days = get_days_to_earnings(sym, atype)
-        same_group_count = sum(1 for p_sym in held_map if all_asset_map.get(p_sym, 'STOCK') == asset_type)
+        same_group_count = sum(1 for p_sym in held if all_asset_map.get(p_sym, 'STOCK') == asset_type)
         cb_active, cb_reason = evaluate_circuit_breaker(effective_capital, load_daily_realized_pnl())
         decision, total_score, reasons, risk = generate_signal(
             row,
