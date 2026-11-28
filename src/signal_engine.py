@@ -315,8 +315,6 @@ def _score_factors(row: dict, asset_type: str, sentiment: float) -> tuple[float,
     return score, reasons, atr, vol_ratio
 
 
-same_group_count = sum(1 for p_sym in open_positions if all_asset_map.get(p_sym, 'STOCK') == asset_type)
-cb_active, cb_reason = evaluate_circuit_breaker(effective_capital, load_daily_realized_pnl())
 def generate_signal(
     row: dict,
     asset_type: str,
@@ -327,16 +325,7 @@ def generate_signal(
     available_cash: float = PORTFOLIO_CAPITAL,
     open_positions_count: int = 0,
     effective_capital: float = PORTFOLIO_CAPITAL,
-)
-if decision.startswith('AL ('):
-    if cb_active:
-        decision = f'BEKLE (KILITLI: {cb_reason})'
-        risk = None
-    elif same_group_count >= MAX_SAME_GROUP_POSITIONS:
-        decision = f'BEKLE (KILITLI: {asset_type} Grup Limiti Dolu {same_group_count}/{MAX_SAME_GROUP_POSITIONS})'
-        risk = None
-    elif risk:
-        available_cash = max(0.0, round(available_cash - risk['position_usd'], 2)) -> tuple[str, float, list[str], dict]:
+) -> tuple[str, float, list[str], dict]:
     profile = ASSET_PROFILES.get(asset_type, ASSET_PROFILES["STOCK"])
     close = row["close"]
     sma200 = row.get("sma_200")
@@ -621,6 +610,8 @@ def run_analysis(persist: bool = True) -> dict:
         atype = active_map.get(sym, "STOCK")
         sent_score, min_sent, _ = sentiment_map.get(sym, (0.0, 0.0, 0))
         earnings_days = get_days_to_earnings(sym, atype)
+        same_group_count = sum(1 for p_sym in open_positions if all_asset_map.get(p_sym, 'STOCK') == asset_type)
+        cb_active, cb_reason = evaluate_circuit_breaker(effective_capital, load_daily_realized_pnl())
         decision, total_score, reasons, risk = generate_signal(
             row,
             atype,
@@ -629,7 +620,16 @@ def run_analysis(persist: bool = True) -> dict:
             min_news_score=min_sent,
             days_to_earnings=earnings_days,
             available_cash=available_cash,
-            open_positions_count=len(positions),
+            open_positions_count=len(positions)
+        if decision.startswith('AL ('):
+            if cb_active:
+                decision = f'BEKLE (KILITLI: {cb_reason})'
+                risk = None
+            elif same_group_count >= MAX_SAME_GROUP_POSITIONS:
+                decision = f'BEKLE (KILITLI: {asset_type} Grup Limiti Dolu {same_group_count}/{MAX_SAME_GROUP_POSITIONS})'
+                risk = None
+            elif risk:
+                available_cash = max(0.0, round(available_cash - risk['position_usd'], 2)),
             effective_capital=effective_capital,
         )
         if persist:
