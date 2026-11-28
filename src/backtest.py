@@ -95,7 +95,7 @@ def _simulate_slice(rows: list[dict], asset_type: str) -> dict:
                 pos["sl"] = max(pos["sl"], pos["entry_px"])
             elif max_hold is not None and days_held >= max_hold:
                 exit_px = close_px * (1.0 - SLIPPAGE_RATE)
-            elif close_px < float(sma_20) and score < 0:
+            elif close_px < float(r["sma_50"]) and score <= -1.0:
                 exit_px = close_px * (1.0 - SLIPPAGE_RATE)
 
             if exit_px is not None:
@@ -110,7 +110,7 @@ def _simulate_slice(rows: list[dict], asset_type: str) -> dict:
             if (not profile["require_macro_bull"] or macro_bull) and (
                 not profile["require_stock_sma200"] or close_px >= float(sma_200)
             ):
-                if score >= 2.0:
+                if score >= 3.0:
                     pending_entry = {"atr": float(atr)}
 
         mtm = cash + (pos["shares"] * close_px if pos is not None else 0.0)
@@ -272,7 +272,7 @@ def run_portfolio_simulation(prepared: dict[str, list[dict]], asset_map: dict[st
                 pos["sl"] = max(pos["sl"], pos["entry_px"])
             elif max_hold is not None and days_held >= max_hold:
                 exit_px = close_px * (1.0 - SLIPPAGE_RATE)
-            elif sma_20 is not None and close_px < float(sma_20) and score < 0:
+            elif sma_20 is not None and close_px < float(r["sma_50"]) and score <= -1.0:
                 exit_px = close_px * (1.0 - SLIPPAGE_RATE)
 
             if exit_px is not None:
@@ -298,7 +298,7 @@ def run_portfolio_simulation(prepared: dict[str, list[dict]], asset_map: dict[st
                 if profile["require_stock_sma200"] and float(row["close"]) < float(row["sma_200"]):
                     continue
                 score, _ = compute_tech_score(row)
-                if score >= 2.0:
+                if score >= 3.0:
                     pending_entries[sym] = {"atr": float(row["atr_14"]), "profile": profile}
                     if len(positions) + len(pending_entries) >= MAX_OPEN_POSITIONS:
                         break

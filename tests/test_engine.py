@@ -335,8 +335,8 @@ def test_portfolio_cli_sell_calculates_realized_pnl(monkeypatch):
         def execute(self, sql, params=None):
             executed_queries.append((sql.strip(), params))
         def fetchone(self):
-            # 10 adet @ $100.00 maliyetli pozisyon
-            return (10.0, 100.0)
+            from datetime import date
+            return (10.0, 100.0, date(2026, 11, 20))
         def __enter__(self):
             return self
         def __exit__(self, *args):
