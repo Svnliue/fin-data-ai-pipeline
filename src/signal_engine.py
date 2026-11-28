@@ -620,7 +620,9 @@ def run_analysis(persist: bool = True) -> dict:
             min_news_score=min_sent,
             days_to_earnings=earnings_days,
             available_cash=available_cash,
-            open_positions_count=len(positions)
+            open_positions_count=len(positions),
+            effective_capital=effective_capital,
+        )
         if decision.startswith('AL ('):
             if cb_active:
                 decision = f'BEKLE (KILITLI: {cb_reason})'
@@ -629,9 +631,7 @@ def run_analysis(persist: bool = True) -> dict:
                 decision = f'BEKLE (KILITLI: {asset_type} Grup Limiti Dolu {same_group_count}/{MAX_SAME_GROUP_POSITIONS})'
                 risk = None
             elif risk:
-                available_cash = max(0.0, round(available_cash - risk['position_usd'], 2)),
-            effective_capital=effective_capital,
-        )
+                available_cash = max(0.0, round(available_cash - risk['position_usd'], 2))
         if persist:
             persist_signal(sym, decision, total_score, row["close"], risk, sent_score, bar_date=row.get("price_date"))
         radar_results.append({
