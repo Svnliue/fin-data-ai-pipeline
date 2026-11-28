@@ -398,6 +398,9 @@ def test_format_report_message_renders_portfolio_positions():
 
 
 def test_price_diff_shock_guard_triggers():
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
     from signal_engine import generate_signal
 
     row = {
@@ -412,14 +415,13 @@ def test_price_diff_shock_guard_triggers():
         "price_diff": -8.5,
     }
     decision, score, reasons, risk = generate_signal(
-        row=row,
-        asset_type="STOCK",
-        is_macro_bull=True,
-        sentiment_score=0.2,
-        min_news_score=0.0,
-        days_to_earnings=30,
-        available_cash=10000.0,
-        effective_capital=10000.0,
+        row,
+        "STOCK",
+        True,
+        0.2,
+        0.0,
+        30,
+        10000.0,
+        10000.0,
     )
     assert decision.startswith("BEKLE")
-    assert any("ŞOK" in r.upper() or "SOK" in r.upper() or "DÜŞÜŞ" in r.upper() or "DUSUS" in r.upper() for r in reasons) or decision != "AL"
