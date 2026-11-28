@@ -5,6 +5,23 @@ import polars as pl
 from indicators import add_technical_indicators, compute_tech_score
 from signal_engine import load_prices_df
 from config import (
+def _unified_hold_decision(pos: dict, row: dict, asset_type: str, is_macro_bull: bool):
+    res = evaluate_held_position(pos, row, asset_type, is_macro_bull, 0.0, 0.0, None)
+    if isinstance(res, tuple):
+        return res
+    return str(res), 0.0, [], {}
+    get_active_asset_map,
+    ASSET_PROFILES,
+    BENCHMARK_SYMBOL,
+    PORTFOLIO_CAPITAL,
+    RISK_PER_TRADE,
+    MAX_POSITION_PCT,
+    MAX_OPEN_POSITIONS,
+    MAX_SAME_GROUP_POSITIONS,
+    COMMISSION_RATE,
+    SLIPPAGE_RATE,
+)
+
 def _unified_entry_decision(row: dict, asset_type: str, is_macro_bull: bool, available_cash: float, effective_capital: float):
     res = generate_signal(
         row,
@@ -26,17 +43,7 @@ def _unified_hold_decision(pos: dict, row: dict, asset_type: str, is_macro_bull:
     if isinstance(res, tuple):
         return res
     return str(res), 0.0, [], {}
-    get_active_asset_map,
-    ASSET_PROFILES,
-    BENCHMARK_SYMBOL,
-    PORTFOLIO_CAPITAL,
-    RISK_PER_TRADE,
-    MAX_POSITION_PCT,
-    MAX_OPEN_POSITIONS,
-    MAX_SAME_GROUP_POSITIONS,
-    COMMISSION_RATE,
-    SLIPPAGE_RATE,
-)
+
 
 
 def _simulate_slice(rows: list[dict], asset_type: str) -> dict:
