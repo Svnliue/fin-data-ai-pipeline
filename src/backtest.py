@@ -272,7 +272,7 @@ def run_portfolio_simulation(prepared: dict[str, list[dict]], asset_map: dict[st
                 pos["sl"] = max(pos["sl"], pos["entry_px"])
             elif max_hold is not None and days_held >= max_hold:
                 exit_px = close_px * (1.0 - SLIPPAGE_RATE)
-            elif sma_20 is not None and close_px < float(r["sma_50"]) and score <= -1.0:
+            elif row["sma_50"] is not None and close_px < float(row["sma_50"]) and score <= -1.0:
                 exit_px = close_px * (1.0 - SLIPPAGE_RATE)
 
             if exit_px is not None:
