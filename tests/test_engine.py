@@ -176,3 +176,55 @@ def test_backtest_next_open_and_metrics():
     assert "profit_factor" in res
     assert "sharpe" in res
     assert "expectancy_usd" in res
+
+
+def test_scheduler_nyse_holiday_detection():
+    from datetime import date
+    from scheduler import _is_nyse_holiday
+    assert _is_nyse_holiday(date(2026, 7, 3)) is True
+    assert _is_nyse_holiday(date(2026, 12, 25)) is True
+    assert _is_nyse_holiday(date(2026, 11, 24)) is False
+
+
+def test_buy_position_preserves_existing_watchlist_type(monkeypatch):
+    import portfolio_cli
+    executed_sql = []
+
+    class DummyCursor:
+        def __init__(self):
+            self._last_query = ""
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def execute(self, query, params=None):
+            self._last_query = query
+            executed_sql.append((query.strip(), params))
+        def fetchone(self):
+            if "SUM(realized_pnl)" in self._last_query:
+                return (0.0,)
+            return None
+        def fetchall(self):
+            return []
+
+    class DummyConn:
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def cursor(self):
+            return DummyCursor()
+        def commit(self):
+            pass
+
+    add_called = {"count": 0}
+    monkeypatch.setattr(portfolio_cli, "get_all_asset_map", lambda: {"IREX": "LEVERAGED"})
+    monkeypatch.setattr(portfolio_cli, "add_symbol", lambda sym: add_called.__setitem__("count", add_called["count"] + 1))
+    monkeypatch.setattr(portfolio_cli, "_get_latest_atr", lambda sym, px: 1.0)
+    monkeypatch.setattr(portfolio_cli, "get_db_connection", lambda: DummyConn())
+
+    portfolio_cli.buy_position("IREX", 10, 10.0, "2026-11-28")
+    assert add_called["count"] == 0
+    insert_calls = [p for q, p in executed_sql if "INSERT INTO portfolio_positions" in q]
+    assert len(insert_calls) == 1
+    assert insert_calls[0][4] == 8.8

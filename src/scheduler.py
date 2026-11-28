@@ -1,33 +1,50 @@
 import time
-from datetime import datetime
+from datetime import datetime, date
 from zoneinfo import ZoneInfo
 import schedule
-from logger import get_logger
 from pipeline_runner import run_full_pipeline
+from config import SCHEDULE_TIME
+from logger import get_logger
 
 log = get_logger("scheduler")
 NY_TZ = ZoneInfo("America/New_York")
 
 
-def _is_nyse_trading_day() -> bool:
+def _is_nyse_holiday(dt: date) -> bool:
+    y = dt.year
+    fixed = {
+        date(y, 1, 1),
+        date(y, 6, 19),
+        date(y, 7, 4),
+        date(y, 12, 25),
+    }
+    observed = set()
+    for h in fixed:
+        if h.weekday() == 5:
+            observed.add(date(y, h.month, max(1, h.day - 1)))
+        elif h.weekday() == 6:
+            observed.add(date(y, h.month, min(28, h.day + 1)))
+        else:
+            observed.add(h)
+    return dt in observed
+
+
+def job() -> None:
     now_ny = datetime.now(NY_TZ)
-    # Pazartesi (0) - Cuma (4) ABD seans gunu kontrolu
-    return now_ny.weekday() < 5
-
-
-def scheduled_job() -> None:
-    if not _is_nyse_trading_day():
-        log.info("ABD borsası kapalı (Hafta sonu). Zamanlanmış görev atlandı.")
+    if now_ny.weekday() >= 5 or _is_nyse_holiday(now_ny.date()):
+        log.info(f"NYSE kapali ({now_ny.date()}), calisma atlandi.")
         return
-    log.info("NYSE seans kapanışı sonrası zamanlanmış pipeline tetiklendi.")
-    run_full_pipeline()
+
+    log.info(f"Zamanlanmis gorev tetiklendi (NY: {now_ny.strftime('%Y-%m-%d %H:%M %Z')})")
+    try:
+        run_full_pipeline(skip_fetch=False, notify=True)
+    except Exception as exc:
+        log.error(f"Zamanlanmis gorev hatasi: {exc}", exc_info=True)
 
 
-def main():
-    # NYSE 16:00 ET kapanisindan 15 dk sonra (16:15 ET) calisir -> yaz/kis saati otomatik uyumlu
-    log.info("Scheduler başlatıldı: Her ABD işlem günü 16:15 America/New_York saatinde çalışacak.")
-    schedule.every().day.at("16:15", "America/New_York").do(scheduled_job)
-
+def main() -> None:
+    schedule.every().day.at(SCHEDULE_TIME, "America/New_York").do(job)
+    log.info(f"Otonom Zamanlayici aktif: Her NYSE islem gunu {SCHEDULE_TIME} America/New_York.")
     while True:
         schedule.run_pending()
         time.sleep(30)
