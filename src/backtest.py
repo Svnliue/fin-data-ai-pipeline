@@ -216,14 +216,14 @@ def run_backtest() -> list[dict]:
 def run_portfolio_simulation(symbol_dfs: dict[str, pl.DataFrame], asset_map: dict[str, str], qqq_df: pl.DataFrame) -> dict:
     """Ortak kasali coklu-sembol portfoy simulasyonu (MAX_OPEN_POSITIONS ve nakit paylasimi ile)."""
     prepared = {}
-    qqq_prep = _prepare_symbol_df(qqq_df, qqq_df)
-    qqq_bull_map = dict(zip(qqq_prep["price_date"].to_list(), (qqq_prep["close_price"] >= qqq_prep["sma_200"]).to_list()))
+    qqq_prep = _prepare_symbol_df(qqq_df)
+    qqq_bull_map = dict(zip(qqq_prep["price_date"].to_list(), (qqq_prep["close"] >= qqq_prep["sma_200"]).to_list()))
 
     all_dates = set()
     for sym, df in symbol_dfs.items():
         if sym == BENCHMARK_SYMBOL or df.height < 220:
             continue
-        pdf = _prepare_symbol_df(df, qqq_df)
+        pdf = _prepare_symbol_df(df)
         rows = pdf.to_dicts()
         prepared[sym] = {r["price_date"]: r for r in rows}
         all_dates.update(r["price_date"] for r in rows[200:])
@@ -242,7 +242,7 @@ def run_portfolio_simulation(symbol_dfs: dict[str, pl.DataFrame], asset_map: dic
         for sym, entry_meta in list(pending_entries.items()):
             row = prepared.get(sym, {}).get(dt)
             if row and sym not in positions and len(positions) < MAX_OPEN_POSITIONS:
-                exec_px = float(row["open_price"]) * (1.0 + SLIPPAGE_PCT)
+                exec_px = float(row["open"]) * (1.0 + SLIPPAGE_RATE)
                 atr = entry_meta["atr"]
                 profile = entry_meta["profile"]
                 sl = exec_px - (profile["sl_atr"] * atr)
@@ -271,10 +271,10 @@ def run_portfolio_simulation(symbol_dfs: dict[str, pl.DataFrame], asset_map: dic
             if not row:
                 continue
             pos = positions[sym]
-            open_px = float(row["open_price"])
-            high_px = float(row["high_price"])
-            low_px = float(row["low_price"])
-            close_px = float(row["close_price"])
+            open_px = float(row["open"])
+            high_px = float(row["high"])
+            low_px = float(row["low"])
+            close_px = float(row["close"])
             sma_20 = row["sma_20"]
             score, _ = _compute_tech_score(row)
             days_held = (dt - pos["entry_date"]).days
@@ -282,15 +282,15 @@ def run_portfolio_simulation(symbol_dfs: dict[str, pl.DataFrame], asset_map: dic
 
             exit_px = None
             if open_px <= pos["sl"]:
-                exit_px = open_px * (1.0 - SLIPPAGE_PCT)
+                exit_px = open_px * (1.0 - SLIPPAGE_RATE)
             elif low_px <= pos["sl"]:
-                exit_px = pos["sl"] * (1.0 - SLIPPAGE_PCT)
+                exit_px = pos["sl"] * (1.0 - SLIPPAGE_RATE)
             elif high_px >= pos["tp2"]:
-                exit_px = pos["tp2"] * (1.0 - SLIPPAGE_PCT)
+                exit_px = pos["tp2"] * (1.0 - SLIPPAGE_RATE)
             elif max_hold is not None and days_held >= max_hold:
-                exit_px = close_px * (1.0 - SLIPPAGE_PCT)
+                exit_px = close_px * (1.0 - SLIPPAGE_RATE)
             elif sma_20 is not None and close_px < float(sma_20) and score < 0:
-                exit_px = close_px * (1.0 - SLIPPAGE_PCT)
+                exit_px = close_px * (1.0 - SLIPPAGE_RATE)
 
             if exit_px is not None:
                 proceeds = pos["shares"] * exit_px * (1.0 - COMMISSION_RATE)
@@ -311,7 +311,7 @@ def run_portfolio_simulation(symbol_dfs: dict[str, pl.DataFrame], asset_map: dic
                 profile = ASSET_PROFILES.get(atype, ASSET_PROFILES["STOCK"])
                 if profile["require_macro_bull"] and not macro_bull:
                     continue
-                if profile["require_stock_sma200"] and float(row["close_price"]) < float(row["sma_200"]):
+                if profile["require_stock_sma200"] and float(row["close"]) < float(row["sma_200"]):
                     continue
                 score, _ = _compute_tech_score(row)
                 if score >= 2.0:
@@ -320,7 +320,7 @@ def run_portfolio_simulation(symbol_dfs: dict[str, pl.DataFrame], asset_map: dic
                         break
 
         mtm_val = cash + sum(
-            pos["shares"] * float(prepared[sym][dt]["close_price"])
+            pos["shares"] * float(prepared[sym][dt]["close"])
             for sym, pos in positions.items()
             if dt in prepared.get(sym, {})
         )

@@ -7,6 +7,9 @@ from db import get_db_connection
 from logger import get_logger
 from indicators import add_technical_indicators
 from config import (
+    MAX_SAME_GROUP_POSITIONS,
+    MAX_DRAWDOWN_PCT,
+    MAX_DAILY_LOSS_PCT,
     get_active_asset_map,
     get_all_asset_map,
     ASSET_PROFILES,
