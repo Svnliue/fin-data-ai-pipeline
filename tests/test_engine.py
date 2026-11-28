@@ -288,3 +288,72 @@ def test_live_run_analysis_enforces_group_limit_and_keeps_risk_dict(monkeypatch)
     assert nvda["risk"] is not None
     assert nvda["risk"]["shares"] == 0
     assert nvda["risk"]["position_usd"] == 0.0
+
+
+def test_circuit_breaker_triggers_on_daily_loss():
+    from signal_engine import evaluate_circuit_breaker
+    triggered, reason = evaluate_circuit_breaker(effective_capital=9800.0, daily_pnl=-350.0, base_capital=10000.0)
+    assert triggered is True
+    assert "Gunluk Zarar" in reason
+
+
+def test_backtest_exit_on_trend_breakdown():
+    from datetime import date, timedelta
+    from backtest import _simulate_slice
+
+    rows = []
+    # İlk 15 bar yükseliş trendi (giriş sinyali tetiklenir), sonraki 15 bar SMA20 altına kırılım
+    for i in range(30):
+        px = 100.0 + (i * 1.2) if i < 15 else 118.0 - ((i - 14) * 1.5)
+        rows.append({
+            "price_date": date(2025, 1, 1) + timedelta(days=i),
+            "open": px,
+            "high": px + 0.5,
+            "low": px - 0.5,
+            "close": px,
+            "atr_14": 1.5,
+            "sma_20": 110.0 if i < 15 else 116.0,
+            "sma_50": 102.0,
+            "sma_200": 90.0,
+            "rsi_14": 62.0 if i < 15 else 38.0,
+            "vol_ratio": 1.6 if i < 15 else 1.1,
+            "rs_vs_qqq_pct": 5.0 if i < 15 else -6.0,
+            "qqq_bull": True,
+        })
+    res = _simulate_slice(rows, asset_type="STOCK")
+    assert res["trades"] >= 1
+
+
+def test_portfolio_cli_sell_calculates_realized_pnl(monkeypatch):
+    import portfolio_cli
+
+    executed_queries = []
+
+    class DummyCursor:
+        def __init__(self):
+            self._step = 0
+        def execute(self, sql, params=None):
+            executed_queries.append((sql.strip(), params))
+        def fetchone(self):
+            # 10 adet @ $100.00 maliyetli pozisyon
+            return (10.0, 100.0)
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+
+    class DummyConn:
+        def cursor(self):
+            return DummyCursor()
+        def commit(self):
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+
+    monkeypatch.setattr(portfolio_cli, "get_db_connection", lambda: DummyConn())
+    portfolio_cli.sell_position("AAPL", 10.0, 115.0)
+    trade_inserts = [p for sql, p in executed_queries if "INSERT INTO trades" in sql]
+    assert len(trade_inserts) == 1
+    assert float(trade_inserts[0][4]) == 150.0

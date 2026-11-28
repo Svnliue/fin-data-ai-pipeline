@@ -504,8 +504,9 @@ def load_daily_realized_pnl() -> float:
         return 0.0
 
 
-def evaluate_circuit_breaker(effective_capital: float, daily_pnl: float, base_capital: float = PORTFOLIO_CAPITAL) -> tuple[bool, str]:
-    dd_pct = (base_capital - effective_capital) / base_capital if base_capital > 0 else 0.0
+def evaluate_circuit_breaker(effective_capital: float, daily_pnl: float, base_capital: float = PORTFOLIO_CAPITAL, peak_capital: float | None = None) -> tuple[bool, str]:
+    ref_peak = max(base_capital, peak_capital or base_capital)
+    dd_pct = (ref_peak - effective_capital) / ref_peak if ref_peak > 0 else 0.0
     if dd_pct >= MAX_DRAWDOWN_PCT:
         return True, f"Max Drawdown Devre Kesici (-{dd_pct*100:.1f}% >= -{MAX_DRAWDOWN_PCT*100:.0f}%)"
     daily_loss_pct = (-daily_pnl) / base_capital if base_capital > 0 else 0.0
@@ -601,7 +602,9 @@ def run_analysis(persist: bool = True) -> dict:
         })
 
     radar_results = []
-    cb_active, cb_reason = evaluate_circuit_breaker(effective_capital, load_daily_realized_pnl())
+    unrealized_pnl = sum((float(rows_by_sym[s]['close']) - p['entry_price']) * p['shares'] for s, p in positions.items() if s in rows_by_sym)
+    mtm_equity = round(effective_capital + unrealized_pnl, 2)
+    cb_active, cb_reason = evaluate_circuit_breaker(mtm_equity, load_daily_realized_pnl(), peak_capital=max(PORTFOLIO_CAPITAL, effective_capital))
     open_count = len(positions)
     group_counts: dict[str, int] = {}
     for p_sym in positions:
@@ -657,6 +660,7 @@ def run_analysis(persist: bool = True) -> dict:
     outcomes_updated = evaluate_signal_outcomes() if persist else 0
 
     return {
+        "warnings": warnings,
         "macro": {
             "benchmark": BENCHMARK_SYMBOL,
             "is_bull": is_macro_bull,
@@ -689,7 +693,7 @@ def main():
     regime_label = "BOĞA REJİMİ (Hisse Kilidi Açık)" if macro["is_bull"] else "AYI REJİMİ (STOCK Kilidi Aktif | COMMODITY/ETF Bağımsız)"
 
     print("\n" + "=" * 100)
-    print("ALPHA ENGINE v4.9.14 RAPORU [1. AÇIK POZİSYONLARIM  |  2. İZLEME LİSTESİ FIRSAT RADARI]")
+    print("ALPHA ENGINE v4.9.15 RAPORU [1. AÇIK POZİSYONLARIM  |  2. İZLEME LİSTESİ FIRSAT RADARI]")
     print(f"MAKRO REJİM [{macro['benchmark']}]: ${macro['close']:.2f} vs SMA-200 ${macro['sma_200']:.2f} -> {regime_label}")
     print(
         f"SERMAYE DURUMU: Efektif ${cap['effective_capital']:,.2f} (Realized PnL: ${cap['realized_pnl']:+,.2f}) | "
