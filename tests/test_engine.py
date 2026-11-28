@@ -150,3 +150,29 @@ def test_true_trailing_stop_never_decreases_and_scaled_out_flag():
     dec, _, _, risk = evaluate_held_position(row_drop, pos, asset_type="STOCK", sentiment=0.40)
     assert risk["stop_loss"] == 100.0
     assert "KISMİ KÂR AL" not in dec
+
+
+def test_backtest_next_open_and_metrics():
+    from backtest import _simulate_slice
+    rows = []
+    for i in range(60):
+        px = 100.0 + (i * 0.5)
+        rows.append({
+            "open": px - 0.2,
+            "high": px + 0.5,
+            "low": px - 0.5,
+            "close": px,
+            "atr_14": 1.5,
+            "sma_20": px - 2.0,
+            "sma_50": px - 5.0,
+            "sma_200": px - 10.0,
+            "rsi_14": 58.0,
+            "vol_ratio": 1.3,
+            "rs_vs_qqq_pct": 4.0,
+            "qqq_bull": True,
+        })
+    res = _simulate_slice(rows, asset_type="STOCK")
+    assert res["return_pct"] > 0
+    assert "profit_factor" in res
+    assert "sharpe" in res
+    assert "expectancy_usd" in res

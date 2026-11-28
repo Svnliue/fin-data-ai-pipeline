@@ -1,7 +1,9 @@
 import os
 from dotenv import load_dotenv
+from logger import get_logger
 
 load_dotenv()
+log = get_logger("config")
 
 DEFAULT_ASSET_MAP = {
     "AAPL": "STOCK",
@@ -20,7 +22,8 @@ RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE", "0.01"))
 MAX_POSITION_PCT = float(os.getenv("MAX_POSITION_PCT", "0.25"))
 MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", "3"))
 COMMISSION_RATE = float(os.getenv("COMMISSION_RATE", "0.001"))
-SCHEDULE_TIME = os.getenv("SCHEDULE_TIME", "00:15")
+SLIPPAGE_RATE = float(os.getenv("SLIPPAGE_RATE", "0.0005"))
+SCHEDULE_TIME = os.getenv("SCHEDULE_TIME", "16:15")
 
 _ETF_PROFILE = {
     "require_macro_bull": False,
@@ -65,7 +68,22 @@ def get_active_asset_map() -> dict[str, str]:
                 cur.execute("SELECT symbol, asset_type FROM watchlist WHERE is_active = TRUE ORDER BY symbol;")
                 rows = dict(cur.fetchall())
                 return rows if rows else dict(DEFAULT_ASSET_MAP)
-    except Exception:
+    except Exception as exc:
+        log.error(f"DB aktif watchlist okunamadı, varsayılana dönülüyor: {exc}")
+        return dict(DEFAULT_ASSET_MAP)
+
+
+def get_all_asset_map() -> dict[str, str]:
+    """Aktif veya pasif fark etmeksizin tum watchlist varlik tiplerini dondurur (acik pozisyon korumasi)."""
+    try:
+        from db import get_db_connection
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT symbol, asset_type FROM watchlist ORDER BY symbol;")
+                rows = dict(cur.fetchall())
+                return rows if rows else dict(DEFAULT_ASSET_MAP)
+    except Exception as exc:
+        log.error(f"DB tum watchlist tipleri okunamadı: {exc}")
         return dict(DEFAULT_ASSET_MAP)
 
 
@@ -76,7 +94,8 @@ def get_held_symbols() -> list[str]:
             with conn.cursor() as cur:
                 cur.execute("SELECT symbol FROM portfolio_positions ORDER BY symbol;")
                 return [r[0] for r in cur.fetchall()]
-    except Exception:
+    except Exception as exc:
+        log.error(f"DB acik pozisyonlar okunamadı: {exc}")
         return []
 
 

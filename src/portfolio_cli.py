@@ -1,8 +1,14 @@
 import sys
+from datetime import date
 import polars as pl
 from db import get_db_connection
 from logger import get_logger
-from config import ASSET_PROFILES, get_active_asset_map
+from config import (
+    ASSET_PROFILES,
+    PORTFOLIO_CAPITAL,
+    MAX_OPEN_POSITIONS,
+    get_all_asset_map,
+)
 from watchlist_cli import add_symbol
 
 log = get_logger("portfolio_cli")
@@ -34,8 +40,8 @@ def _get_latest_atr(symbol: str, fallback_price: float) -> float:
             atr = df["tr"].tail(14).mean()
             if atr and atr > 0:
                 return round(float(atr), 4)
-    except Exception:
-        pass
+    except Exception as exc:
+        log.error(f"{symbol} ATR hesaplanamadı, %2 fallback kullanılıyor: {exc}")
     return round(fallback_price * 0.02, 4)
 
 
@@ -65,7 +71,7 @@ def list_positions() -> list[dict]:
             cost = shares * entry_px
             print(
                 f"  {sym:<8} | {atype:<10} | Adet: {shares:<7.2f} | Maliyet: ${entry_px:<8.2f} | "
-                f"SL: ${sl:<8.2f} | TP1: ${tp1:<8.2f} | TP2: ${tp2:<8.2f} | KısmiSatış: {scaled}"
+                f"SL: ${sl:<8.2f} | TP1: ${tp1:<8.2f} | TP2: ${tp2:<8.2f} | KısmiSatış: {scaled} | Tarih: {edate}"
             )
             result.append({
                 "symbol": sym,
@@ -80,40 +86,62 @@ def list_positions() -> list[dict]:
                 "entry_date": str(edate),
                 "cost_usd": round(cost, 2),
             })
-    print("-" * 92)
+    print("-" * 102)
     return result
 
 
-def buy_position(symbol: str, shares: float, entry_price: float) -> None:
+def buy_position(symbol: str, shares: float, entry_price: float, entry_date_str: str | None = None) -> None:
     sym = symbol.strip().upper()
     if shares <= 0 or entry_price <= 0:
         raise ValueError("Adet ve alış fiyatı 0'dan büyük olmalıdır.")
 
-    add_symbol(sym)
-    atype = get_active_asset_map().get(sym, "STOCK")
+    entry_dt = date.fromisoformat(entry_date_str) if entry_date_str else date.today()
+
+    # Sembol zaten watchlist'te varsa manuel/mevcut asset_type ASLA ezilmez
+    all_assets = get_all_asset_map()
+    if sym not in all_assets:
+        add_symbol(sym)
+        all_assets = get_all_asset_map()
+
+    atype = all_assets.get(sym, "STOCK")
     profile = ASSET_PROFILES.get(atype, ASSET_PROFILES["STOCK"])
     atr = _get_latest_atr(sym, entry_price)
 
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT shares::float, entry_price::float FROM portfolio_positions WHERE symbol = %s;", (sym,))
-            existing = cur.fetchone()
-            if existing:
-                old_shares, old_px = existing
+            cur.execute("SELECT COALESCE(SUM(realized_pnl), 0)::float FROM trades;")
+            realized = float(cur.fetchone()[0] or 0.0)
+
+            cur.execute("SELECT symbol, shares::float, entry_price::float, COALESCE(stop_loss::float, 0) FROM portfolio_positions;")
+            open_rows = {r[0]: (r[1], r[2], r[3]) for r in cur.fetchall()}
+
+            invested = sum(s * p for s, p, _ in open_rows.values())
+            avail_cash = (PORTFOLIO_CAPITAL + realized) - invested
+            order_cost = shares * entry_price
+
+            if order_cost > avail_cash + 1e-6:
+                raise ValueError(f"Yetersiz serbest nakit! Gerekli: ${order_cost:.2f}, Mevcut Nakit: ${avail_cash:.2f}")
+
+            if sym not in open_rows and len(open_rows) >= MAX_OPEN_POSITIONS:
+                raise ValueError(f"Maksimum açık pozisyon limitine ({MAX_OPEN_POSITIONS}) ulaşıldı.")
+
+            if sym in open_rows:
+                old_shares, old_px, old_sl = open_rows[sym]
                 new_shares = old_shares + shares
                 avg_px = ((old_shares * old_px) + (shares * entry_price)) / new_shares
-                sl = round(max(0.01, avg_px - (profile["sl_atr"] * atr)), 4)
+                # Yukselmis trailing stop averaj aliminda asagi cekilmez
+                new_sl = round(max(old_sl, avg_px - (profile["sl_atr"] * atr)), 4)
                 tp1 = round(avg_px + (profile["tp1_atr"] * atr), 4)
                 tp2 = round(avg_px + (profile["tp2_atr"] * atr), 4)
                 cur.execute(
                     """
                     UPDATE portfolio_positions
                     SET shares = %s, entry_price = %s, initial_atr = %s,
-                        stop_loss = %s, tp1 = %s, tp2 = %s, scaled_out = FALSE,
+                        stop_loss = %s, tp1 = %s, tp2 = %s,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE symbol = %s;
                     """,
-                    (new_shares, round(avg_px, 4), atr, sl, tp1, tp2, sym),
+                    (new_shares, round(avg_px, 4), atr, new_sl, tp1, tp2, sym),
                 )
             else:
                 sl = round(max(0.01, entry_price - (profile["sl_atr"] * atr)), 4)
@@ -122,13 +150,13 @@ def buy_position(symbol: str, shares: float, entry_price: float) -> None:
                 cur.execute(
                     """
                     INSERT INTO portfolio_positions
-                        (symbol, shares, entry_price, initial_atr, stop_loss, tp1, tp2, scaled_out)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, FALSE);
+                        (symbol, shares, entry_price, initial_atr, stop_loss, tp1, tp2, scaled_out, entry_date)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, FALSE, %s);
                     """,
-                    (sym, shares, entry_price, atr, sl, tp1, tp2),
+                    (sym, shares, entry_price, atr, sl, tp1, tp2, entry_dt),
                 )
         conn.commit()
-    log.info(f"Portföy güncellendi: {sym} kaydedildi (ATR: {atr:.2f}, SL: {sl:.2f}, TP1: {tp1:.2f}, TP2: {tp2:.2f}).")
+    log.info(f"Portföy güncellendi: {sym} ({atype}) kaydedildi | Tarih: {entry_dt}")
 
 
 def sell_position(symbol: str, shares: float | None = None, exit_price: float | None = None, reason: str = "MANUAL_SELL") -> None:
@@ -182,7 +210,8 @@ if __name__ == "__main__":
     if len(sys.argv) < 2 or sys.argv[1] == "list":
         list_positions()
     elif sys.argv[1] == "buy" and len(sys.argv) >= 5:
-        buy_position(sys.argv[2], float(sys.argv[3]), float(sys.argv[4]))
+        edate_arg = sys.argv[5] if len(sys.argv) >= 6 else None
+        buy_position(sys.argv[2], float(sys.argv[3]), float(sys.argv[4]), edate_arg)
         list_positions()
     elif sys.argv[1] == "sell" and len(sys.argv) >= 3:
         qty = float(sys.argv[3]) if len(sys.argv) >= 4 else None
@@ -190,4 +219,4 @@ if __name__ == "__main__":
         sell_position(sys.argv[2], qty, px)
         list_positions()
     else:
-        print("Kullanım: python src/portfolio_cli.py [list | buy <SEMBOL> <ADET> <ALIŞ_FİYATI> | sell <SEMBOL> [ADET] [SATIŞ_FİYATI]]")
+        print("Kullanım: python src/portfolio_cli.py [list | buy <SEMBOL> <ADET> <ALIŞ_FİYATI> [YYYY-MM-DD] | sell <SEMBOL> [ADET] [SATIŞ_FİYATI]]")

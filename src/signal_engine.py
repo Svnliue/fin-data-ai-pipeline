@@ -5,8 +5,10 @@ import yfinance as yf
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from db import get_db_connection
 from logger import get_logger
+from indicators import add_technical_indicators
 from config import (
     get_active_asset_map,
+    get_all_asset_map,
     ASSET_PROFILES,
     BENCHMARK_SYMBOL,
     FINBERT_MODEL,
@@ -89,7 +91,8 @@ def load_realized_pnl() -> float:
                 cur.execute("SELECT COALESCE(SUM(realized_pnl), 0)::float FROM trades;")
                 row = cur.fetchone()
                 return float(row[0]) if row else 0.0
-    except Exception:
+    except Exception as exc:
+        log.error(f"Realized PnL okunamadı: {exc}")
         return 0.0
 
 
@@ -110,40 +113,19 @@ def get_benchmark_metrics(df: pl.DataFrame) -> tuple[bool, float, float, float]:
 
 
 def compute_technical_and_risk(df: pl.DataFrame, symbols: list[str], qqq_ret_20d: float) -> pl.DataFrame:
-    df = df.filter(pl.col("symbol").is_in(symbols)).sort(["symbol", "price_date"])
+    sub = df.filter(pl.col("symbol").is_in(symbols))
+    qqq_ret_df = df.filter(pl.col("symbol") == BENCHMARK_SYMBOL).sort("price_date").with_columns(
+        ((pl.col("close") / pl.col("close").shift(20)) - 1.0).alias("qqq_ret_20d")
+    ).select(["price_date", "qqq_ret_20d"])
 
-    df = df.with_columns([
-        pl.col("close").rolling_mean(window_size=20).over("symbol").alias("sma_20"),
-        pl.col("close").rolling_mean(window_size=50).over("symbol").alias("sma_50"),
-        pl.col("close").rolling_mean(window_size=200).over("symbol").alias("sma_200"),
-        pl.col("volume").rolling_mean(window_size=20).over("symbol").alias("vol_sma_20"),
-        ((pl.col("close") / pl.col("close").shift(20).over("symbol")) - 1.0).alias("ret_20d"),
-        (pl.col("close") - pl.col("close").shift(1).over("symbol")).alias("delta"),
-        pl.max_horizontal([
-            pl.col("high") - pl.col("low"),
-            (pl.col("high") - pl.col("close").shift(1).over("symbol")).abs(),
-            (pl.col("low") - pl.col("close").shift(1).over("symbol")).abs(),
-        ]).alias("tr"),
-    ])
+    if qqq_ret_df.is_empty():
+        sub = add_technical_indicators(sub, None).with_columns(
+            ((pl.col("ret_20d") - qqq_ret_20d) * 100.0).alias("rs_vs_qqq_pct")
+        )
+    else:
+        sub = add_technical_indicators(sub, qqq_ret_df)
 
-    df = df.with_columns([
-        pl.when(pl.col("delta") > 0).then(pl.col("delta")).otherwise(0.0).alias("gain"),
-        pl.when(pl.col("delta") < 0).then(-pl.col("delta")).otherwise(0.0).alias("loss"),
-        pl.col("tr").rolling_mean(window_size=14).over("symbol").alias("atr_14"),
-        (pl.col("volume") / (pl.col("vol_sma_20") + 1e-9)).alias("vol_ratio"),
-        ((pl.col("ret_20d") - qqq_ret_20d) * 100.0).alias("rs_vs_qqq_pct"),
-    ])
-
-    df = df.with_columns([
-        pl.col("gain").rolling_mean(window_size=14).over("symbol").alias("avg_gain"),
-        pl.col("loss").rolling_mean(window_size=14).over("symbol").alias("avg_loss"),
-    ])
-
-    df = df.with_columns(
-        (100.0 - (100.0 / (1.0 + (pl.col("avg_gain") / (pl.col("avg_loss") + 1e-9))))).alias("rsi_14")
-    )
-
-    return df.group_by("symbol").last().sort("symbol")
+    return sub.group_by("symbol").last().sort("symbol")
 
 
 def compute_finbert_sentiment(symbols: list[str], lookback_days: int = NEWS_LOOKBACK_DAYS) -> dict[str, tuple[float, float, int]]:
@@ -152,9 +134,8 @@ def compute_finbert_sentiment(symbols: list[str], lookback_days: int = NEWS_LOOK
     query = """
         SELECT symbol, title, content
         FROM market_news
-        WHERE published_at >= NOW() - (%s * INTERVAL '1 day')
-           OR published_at IS NULL
-        ORDER BY published_at DESC NULLS LAST;
+        WHERE COALESCE(published_at, created_at) >= NOW() - (%s * INTERVAL '1 day')
+        ORDER BY COALESCE(published_at, created_at) DESC;
     """
     with get_db_connection() as conn:
         with conn.cursor() as cur:
@@ -379,11 +360,9 @@ def evaluate_held_position(
     vol_price_shock = (vol_ratio >= SHOCK_VOL_RATIO) and (delta <= -2.5 * current_atr)
     shock_active = news_shock or vol_price_shock
 
-    # Sabit giris hedefleri (yoksa initial_atr ile uret)
     tp1_target = position.get("tp1") or (entry_price + (profile["tp1_atr"] * base_atr))
     tp2_target = position.get("tp2") or (entry_price + (profile["tp2_atr"] * base_atr))
 
-    # Gercek Trailing Stop: onceki stopun altina ASLA dusmez
     prev_sl = position.get("stop_loss") or max(0.01, entry_price - (profile["sl_atr"] * base_atr))
     effective_sl_mult = 0.75 if shock_active else profile["sl_atr"]
     candidate_sl = max(0.01, close - (effective_sl_mult * current_atr))
@@ -456,8 +435,8 @@ def _update_position_trailing_state(symbol: str, stop_loss: float, tp1: float, t
                     (stop_loss, tp1, tp2, symbol),
                 )
             conn.commit()
-    except Exception:
-        pass
+    except Exception as exc:
+        log.error(f"{symbol} trailing stop state DB'ye yazılamadı: {exc}")
 
 
 def persist_signal(symbol: str, decision: str, score: float, close: float, risk: dict, sentiment: float) -> None:
@@ -480,10 +459,10 @@ def persist_signal(symbol: str, decision: str, score: float, close: float, risk:
 
 
 def run_analysis(persist: bool = True) -> dict:
-    """FastAPI ve CLI tarafindan cagrilan yapilandirilmis analiz motoru."""
-    asset_map = get_active_asset_map()
+    active_map = get_active_asset_map()
+    all_asset_map = get_all_asset_map()
     positions = load_portfolio_positions()
-    all_symbols = sorted(set(asset_map.keys()) | set(positions.keys()))
+    all_symbols = sorted(set(active_map.keys()) | set(positions.keys()))
 
     realized_pnl = load_realized_pnl()
     effective_capital = round(PORTFOLIO_CAPITAL + realized_pnl, 2)
@@ -501,7 +480,8 @@ def run_analysis(persist: bool = True) -> dict:
         if sym not in rows_by_sym:
             continue
         row = rows_by_sym[sym]
-        atype = asset_map.get(sym, "STOCK")
+        # Pasif olsa bile gercek asset_type korunur
+        atype = all_asset_map.get(sym, "STOCK")
         sent_score, min_sent, _ = sentiment_map.get(sym, (0.0, 0.0, 0))
         earnings_days = get_days_to_earnings(sym, atype)
         decision, total_score, reasons, risk = evaluate_held_position(
@@ -522,11 +502,11 @@ def run_analysis(persist: bool = True) -> dict:
         })
 
     radar_results = []
-    for sym in [s for s in sorted(asset_map.keys()) if s not in positions]:
+    for sym in [s for s in sorted(active_map.keys()) if s not in positions]:
         if sym not in rows_by_sym:
             continue
         row = rows_by_sym[sym]
-        atype = asset_map.get(sym, "STOCK")
+        atype = active_map.get(sym, "STOCK")
         sent_score, min_sent, _ = sentiment_map.get(sym, (0.0, 0.0, 0))
         earnings_days = get_days_to_earnings(sym, atype)
         decision, total_score, reasons, risk = generate_signal(
@@ -585,7 +565,7 @@ def main():
     regime_label = "BOĞA REJİMİ (Hisse Kilidi Açık)" if macro["is_bull"] else "AYI REJİMİ (STOCK Kilidi Aktif | COMMODITY/ETF Bağımsız)"
 
     print("\n" + "=" * 100)
-    print("ALPHA ENGINE v4.9.6 RAPORU [1. AÇIK POZİSYONLARIM  |  2. İZLEME LİSTESİ FIRSAT RADARI]")
+    print("ALPHA ENGINE v4.9.7 RAPORU [1. AÇIK POZİSYONLARIM  |  2. İZLEME LİSTESİ FIRSAT RADARI]")
     print(f"MAKRO REJİM [{macro['benchmark']}]: ${macro['close']:.2f} vs SMA-200 ${macro['sma_200']:.2f} -> {regime_label}")
     print(
         f"SERMAYE DURUMU: Efektif ${cap['effective_capital']:,.2f} (Realized PnL: ${cap['realized_pnl']:+,.2f}) | "

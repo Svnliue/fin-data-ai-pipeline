@@ -1,4 +1,5 @@
 import time
+from migrate import run_migrations
 import fetch_prices
 import fetch_news
 import signal_engine
@@ -8,22 +9,20 @@ log = get_logger("pipeline_runner")
 
 
 def run_full_pipeline(skip_fetch: bool = False) -> dict:
-    """
-    Fiyat ETL + AI Haber Vektorizasyonu + Alpha Sinyal Motorunu tek akista calistirir.
-    FastAPI BackgroundTasks ve CLI tarafindan dogrudan cagirilir.
-    """
     t0 = time.perf_counter()
     log.info("Uçtan Uca Kantitatif Boru Hattı Başlatıldı...")
+    run_migrations()
 
     if not skip_fetch:
         fetch_prices.main()
         fetch_news.main()
 
-    signal_engine.main()
+    report = signal_engine.run_analysis(persist=True)
     elapsed = round(time.perf_counter() - t0, 2)
     log.info(f"Boru Hattı Tamamlandı ({elapsed} sn)")
-    return {"status": "ok", "elapsed_seconds": elapsed}
+    return {"status": "ok", "elapsed_seconds": elapsed, "report": report}
 
 
 if __name__ == "__main__":
-    run_full_pipeline()
+    run_migrations()
+    signal_engine.main()
