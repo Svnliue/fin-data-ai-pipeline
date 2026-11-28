@@ -45,23 +45,24 @@ def fetch_news_for_symbol(symbol: str, model: SentenceTransformer) -> int:
             except ValueError:
                 pub_dt = None
 
-        candidates.append({"title": title, "summary": summary, "url": url, "pub_dt": pub_dt})
+        candidates.append({"title": title, "content": summary, "url": url, "pub_dt": pub_dt})
 
     existing_urls = _get_existing_urls([c["url"] for c in candidates])
     new_items = [c for c in candidates if c["url"] not in existing_urls]
     if not new_items:
         return 0
 
-    texts = [f"{c['title']}. {c['summary']}" for c in new_items]
+    texts = [f"{c['title']}. {c['content']}" for c in new_items]
     embeddings = model.encode(texts, normalize_embeddings=True)
 
-    rows = [
-        (symbol, c["title"], c["summary"], c["url"], c["pub_dt"], emb.tolist())
-        for c, emb in zip(new_items, embeddings)
-    ]
+    rows = []
+    for c, emb in zip(new_items, embeddings):
+        vec_str = "[" + ",".join(f"{float(v):.6f}" for v in emb.tolist()) + "]"
+        rows.append((symbol, c["title"], c["content"], c["url"], c["pub_dt"], vec_str))
+
     query = """
-        INSERT INTO market_news (symbol, title, summary, url, published_at, embedding)
-        VALUES (%s, %s, %s, %s, %s, %s)
+        INSERT INTO market_news (symbol, title, content, url, published_at, embedding)
+        VALUES (%s, %s, %s, %s, %s, %s::vector)
         ON CONFLICT (url) DO NOTHING;
     """
     with get_db_connection() as conn:
@@ -72,7 +73,7 @@ def fetch_news_for_symbol(symbol: str, model: SentenceTransformer) -> int:
 
 
 def main() -> int:
-    log.info("Haber & Vektor ETL Boru Hatti Baslatildi (Pre-Embed Dedupe + Acik Pozisyonlar)")
+    log.info("Haber & Vektor ETL Boru Hatti Baslatildi (content kolonu + ::vector + Pre-Embed Dedupe)")
     model = SentenceTransformer(EMBEDDING_MODEL)
     symbols = [s for s in get_target_symbols() if s != BENCHMARK_SYMBOL]
     total_inserted = 0

@@ -315,6 +315,8 @@ def _score_factors(row: dict, asset_type: str, sentiment: float) -> tuple[float,
     return score, reasons, atr, vol_ratio
 
 
+same_group_count = sum(1 for p_sym in open_positions if all_asset_map.get(p_sym, 'STOCK') == asset_type)
+cb_active, cb_reason = evaluate_circuit_breaker(effective_capital, load_daily_realized_pnl())
 def generate_signal(
     row: dict,
     asset_type: str,
@@ -325,7 +327,16 @@ def generate_signal(
     available_cash: float = PORTFOLIO_CAPITAL,
     open_positions_count: int = 0,
     effective_capital: float = PORTFOLIO_CAPITAL,
-) -> tuple[str, float, list[str], dict]:
+)
+if decision.startswith('AL ('):
+    if cb_active:
+        decision = f'BEKLE (KILITLI: {cb_reason})'
+        risk = None
+    elif same_group_count >= MAX_SAME_GROUP_POSITIONS:
+        decision = f'BEKLE (KILITLI: {asset_type} Grup Limiti Dolu {same_group_count}/{MAX_SAME_GROUP_POSITIONS})'
+        risk = None
+    elif risk:
+        available_cash = max(0.0, round(available_cash - risk['position_usd'], 2)) -> tuple[str, float, list[str], dict]:
     profile = ASSET_PROFILES.get(asset_type, ASSET_PROFILES["STOCK"])
     close = row["close"]
     sma200 = row.get("sma_200")
@@ -574,8 +585,9 @@ def run_analysis(persist: bool = True) -> dict:
     held_results = []
     for sym in sorted(positions.keys()):
         if sym not in rows_by_sym:
-            log.warning(f"Acik pozisyon {sym} icin fiyat verisi bulunamadi, degerlendirme atlandi.")
-            print(f"  * {sym:<6}: [UYARI] Fiyat verisi bulunamadi, degerlendirme atlandi.")
+            msg = f"Acik pozisyon {sym} icin fiyat verisi bulunamadi, degerlendirme atlandi."
+            log.warning(msg)
+            warnings.append(msg)
             continue
         row = rows_by_sym[sym]
         atype = all_asset_map.get(sym, "STOCK")
@@ -601,8 +613,9 @@ def run_analysis(persist: bool = True) -> dict:
     radar_results = []
     for sym in [s for s in sorted(active_map.keys()) if s not in positions]:
         if sym not in rows_by_sym:
-            log.warning(f"Acik pozisyon {sym} icin fiyat verisi bulunamadi, degerlendirme atlandi.")
-            print(f"  * {sym:<6}: [UYARI] Fiyat verisi bulunamadi, degerlendirme atlandi.")
+            msg = f"Izleme listesi sembolu {sym} icin fiyat verisi bulunamadi, analiz atlandi."
+            log.warning(msg)
+            warnings.append(msg)
             continue
         row = rows_by_sym[sym]
         atype = active_map.get(sym, "STOCK")
@@ -667,7 +680,7 @@ def main():
     regime_label = "BOĞA REJİMİ (Hisse Kilidi Açık)" if macro["is_bull"] else "AYI REJİMİ (STOCK Kilidi Aktif | COMMODITY/ETF Bağımsız)"
 
     print("\n" + "=" * 100)
-    print("ALPHA ENGINE v4.9.12 RAPORU [1. AÇIK POZİSYONLARIM  |  2. İZLEME LİSTESİ FIRSAT RADARI]")
+    print("ALPHA ENGINE v4.9.13 RAPORU [1. AÇIK POZİSYONLARIM  |  2. İZLEME LİSTESİ FIRSAT RADARI]")
     print(f"MAKRO REJİM [{macro['benchmark']}]: ${macro['close']:.2f} vs SMA-200 ${macro['sma_200']:.2f} -> {regime_label}")
     print(
         f"SERMAYE DURUMU: Efektif ${cap['effective_capital']:,.2f} (Realized PnL: ${cap['realized_pnl']:+,.2f}) | "
