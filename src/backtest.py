@@ -5,7 +5,18 @@ import polars as pl
 from indicators import add_technical_indicators, compute_tech_score
 from signal_engine import load_prices_df
 from config import (
+    get_active_asset_map,
+    ASSET_PROFILES,
+    BENCHMARK_SYMBOL,
+    PORTFOLIO_CAPITAL,
+    RISK_PER_TRADE,
+    MAX_POSITION_PCT,
+    MAX_OPEN_POSITIONS,
+    MAX_SAME_GROUP_POSITIONS,
+    COMMISSION_RATE,
+    SLIPPAGE_RATE,
 )
+
 
 
 def _unified_entry_decision(row: dict, asset_type: str, is_macro_bull: bool, available_cash: float, effective_capital: float):
