@@ -129,10 +129,12 @@ def compute_technical_and_risk(df: pl.DataFrame, symbols: list[str], qqq_ret_20d
 
 
 def compute_finbert_sentiment(symbols: list[str], lookback_days: int = NEWS_LOOKBACK_DAYS) -> dict[str, tuple[float, float, int]]:
-    tokenizer, model = _get_finbert_pipeline()
-
+    """
+    Sadece DB'de finbert_score IS NULL olan yeni haberleri skorlar ve DB'ye yazar;
+    daha once skorlanmis haberleri dogrudan DB onbelleginden okur.
+    """
     query = """
-        SELECT symbol, title, content
+        SELECT id, symbol, title, content, finbert_score::float
         FROM market_news
         WHERE COALESCE(published_at, created_at) >= NOW() - (%s * INTERVAL '1 day')
         ORDER BY COALESCE(published_at, created_at) DESC;
@@ -143,22 +145,88 @@ def compute_finbert_sentiment(symbols: list[str], lookback_days: int = NEWS_LOOK
             rows = cur.fetchall()
 
     scores_by_symbol: dict[str, list[float]] = {s: [] for s in symbols}
+    to_update: list[tuple[float, int]] = []
 
-    for symbol, title, content in rows:
+    unscored_rows = [r for r in rows if r[1] in scores_by_symbol and r[4] is None]
+    tokenizer, model = _get_finbert_pipeline() if unscored_rows else (None, None)
+
+    for news_id, symbol, title, content, cached_score in rows:
         if symbol not in scores_by_symbol:
             continue
-        text = f"{title}. {content}"[:512]
-        inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=256)
-        with torch.no_grad():
-            logits = model(**inputs).logits
-            probs = torch.softmax(logits, dim=-1).squeeze().tolist()
-        net_score = probs[0] - probs[1]
-        scores_by_symbol[symbol].append(net_score)
+        if cached_score is not None:
+            scores_by_symbol[symbol].append(float(cached_score))
+        else:
+            text = f"{title}. {content}"[:512]
+            inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=256)
+            with torch.no_grad():
+                logits = model(**inputs).logits
+                probs = torch.softmax(logits, dim=-1).squeeze().tolist()
+            net_score = round(float(probs[0] - probs[1]), 3)
+            scores_by_symbol[symbol].append(net_score)
+            to_update.append((net_score, news_id))
+
+    if to_update:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.executemany("UPDATE market_news SET finbert_score = %s WHERE id = %s;", to_update)
+            conn.commit()
+        log.info(f"FinBERT önbellek güncellendi: {len(to_update)} yeni haber skorlandı.")
 
     return {
         sym: (round(sum(vals) / len(vals), 3), round(min(vals), 3), len(vals)) if vals else (0.0, 0.0, 0)
         for sym, vals in scores_by_symbol.items()
     }
+
+
+def evaluate_signal_outcomes() -> int:
+    """
+    signal_history tablosundaki gecmis sinyallerin 5 ve 10 islem gunu sonraki
+    gercek getiri yuzdelerini (forward test) otomatik doldurur.
+    """
+    updated = 0
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, symbol, signal_date, close_price::float
+                    FROM signal_history
+                    WHERE (outcome_5d_pct IS NULL OR outcome_10d_pct IS NULL)
+                      AND close_price IS NOT NULL
+                      AND close_price > 0;
+                    """
+                )
+                pending = cur.fetchall()
+
+                for sig_id, sym, sig_date, entry_close in pending:
+                    cur.execute(
+                        """
+                        SELECT close_price::float
+                        FROM market_prices
+                        WHERE symbol = %s AND price_date > %s
+                        ORDER BY price_date ASC
+                        LIMIT 10;
+                        """,
+                        (sym, sig_date),
+                    )
+                    future_bars = [r[0] for r in cur.fetchall()]
+                    out_5 = round(((future_bars[4] - entry_close) / entry_close) * 100.0, 2) if len(future_bars) >= 5 else None
+                    out_10 = round(((future_bars[9] - entry_close) / entry_close) * 100.0, 2) if len(future_bars) >= 10 else None
+                    if out_5 is not None or out_10 is not None:
+                        cur.execute(
+                            """
+                            UPDATE signal_history
+                            SET outcome_5d_pct = COALESCE(%s, outcome_5d_pct),
+                                outcome_10d_pct = COALESCE(%s, outcome_10d_pct)
+                            WHERE id = %s;
+                            """,
+                            (out_5, out_10, sig_id),
+                        )
+                        updated += 1
+            conn.commit()
+    except Exception as exc:
+        log.error(f"Forward-test sonuç takibi güncellenemedi: {exc}")
+    return updated
 
 
 def get_days_to_earnings(symbol: str, asset_type: str) -> int | None:
@@ -305,6 +373,7 @@ def generate_signal(
 
     risk_plan = {
         "asset_type": asset_type,
+        "bar_date": str(row.get("price_date") or date.today()),
         "max_hold": profile["max_hold_days"],
         "shock_active": shock_active,
         "days_to_earnings": days_to_earnings,
@@ -397,6 +466,7 @@ def evaluate_held_position(
 
     risk_plan = {
         "asset_type": asset_type,
+        "bar_date": str(row.get("price_date") or date.today()),
         "shares": shares,
         "entry_price": round(entry_price, 2),
         "days_held": days_held,
@@ -439,10 +509,11 @@ def _update_position_trailing_state(symbol: str, stop_loss: float, tp1: float, t
         log.error(f"{symbol} trailing stop state DB'ye yazılamadı: {exc}")
 
 
-def persist_signal(symbol: str, decision: str, score: float, close: float, risk: dict, sentiment: float) -> None:
+def persist_signal(symbol: str, decision: str, score: float, close: float, risk: dict, sentiment: float, bar_date=None) -> None:
+    sig_dt = bar_date or date.today()
     query = """
         INSERT INTO signal_history (symbol, signal_date, decision, confidence_score, close_price, stop_loss, take_profit, finbert_score)
-        VALUES (%s, CURRENT_DATE, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (symbol, signal_date)
         DO UPDATE SET
             decision = EXCLUDED.decision,
@@ -454,7 +525,7 @@ def persist_signal(symbol: str, decision: str, score: float, close: float, risk:
     """
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(query, (symbol, decision[:250], score, close, risk["stop_loss"], risk["take_profit"], sentiment))
+            cur.execute(query, (symbol, sig_dt, decision[:250], score, close, risk["stop_loss"], risk["take_profit"], sentiment))
         conn.commit()
 
 
@@ -480,7 +551,6 @@ def run_analysis(persist: bool = True) -> dict:
         if sym not in rows_by_sym:
             continue
         row = rows_by_sym[sym]
-        # Pasif olsa bile gercek asset_type korunur
         atype = all_asset_map.get(sym, "STOCK")
         sent_score, min_sent, _ = sentiment_map.get(sym, (0.0, 0.0, 0))
         earnings_days = get_days_to_earnings(sym, atype)
@@ -489,7 +559,7 @@ def run_analysis(persist: bool = True) -> dict:
         )
         if persist:
             _update_position_trailing_state(sym, risk["stop_loss"], risk["partial_tp"], risk["take_profit"])
-            persist_signal(sym, f"[PORTFÖY] {decision}", total_score, row["close"], risk, sent_score)
+            persist_signal(sym, f"[PORTFÖY] {decision}", total_score, row["close"], risk, sent_score, bar_date=row.get("price_date"))
         held_results.append({
             "symbol": sym,
             "asset_type": atype,
@@ -521,7 +591,7 @@ def run_analysis(persist: bool = True) -> dict:
             effective_capital=effective_capital,
         )
         if persist:
-            persist_signal(sym, decision, total_score, row["close"], risk, sent_score)
+            persist_signal(sym, decision, total_score, row["close"], risk, sent_score, bar_date=row.get("price_date"))
         radar_results.append({
             "symbol": sym,
             "asset_type": atype,
@@ -532,6 +602,8 @@ def run_analysis(persist: bool = True) -> dict:
             "reasons": reasons,
             "risk": risk,
         })
+
+    outcomes_updated = evaluate_signal_outcomes() if persist else 0
 
     return {
         "macro": {
@@ -549,6 +621,7 @@ def run_analysis(persist: bool = True) -> dict:
             "open_positions": len(positions),
             "max_positions": MAX_OPEN_POSITIONS,
         },
+        "outcomes_updated": outcomes_updated,
         "portfolio": held_results,
         "radar": radar_results,
     }
@@ -565,7 +638,7 @@ def main():
     regime_label = "BOĞA REJİMİ (Hisse Kilidi Açık)" if macro["is_bull"] else "AYI REJİMİ (STOCK Kilidi Aktif | COMMODITY/ETF Bağımsız)"
 
     print("\n" + "=" * 100)
-    print("ALPHA ENGINE v4.9.7 RAPORU [1. AÇIK POZİSYONLARIM  |  2. İZLEME LİSTESİ FIRSAT RADARI]")
+    print("ALPHA ENGINE v4.9.8 RAPORU [1. AÇIK POZİSYONLARIM  |  2. İZLEME LİSTESİ FIRSAT RADARI]")
     print(f"MAKRO REJİM [{macro['benchmark']}]: ${macro['close']:.2f} vs SMA-200 ${macro['sma_200']:.2f} -> {regime_label}")
     print(
         f"SERMAYE DURUMU: Efektif ${cap['effective_capital']:,.2f} (Realized PnL: ${cap['realized_pnl']:+,.2f}) | "
@@ -598,7 +671,7 @@ def main():
             print(f"  - Önerilen Lot (Serbest Nakit ${cap['available_cash']:,.2f}): {risk['shares']} adet (~${risk['position_usd']:.2f})")
         print(f"  - Puan Detayı: {' | '.join(item['reasons'])}")
 
-    print("\n[DB] Tüm sinyaller PostgreSQL signal_history tablosuna kaydedildi.")
+    print(f"\n[DB] Tüm sinyaller bar tarihiyle signal_history tablosuna kaydedildi (Forward-test güncellenen: {report['outcomes_updated']}).")
     print("=" * 100)
 
 
