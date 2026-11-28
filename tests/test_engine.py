@@ -357,3 +357,41 @@ def test_portfolio_cli_sell_calculates_realized_pnl(monkeypatch):
     trade_inserts = [p for sql, p in executed_queries if "INSERT INTO trades" in sql]
     assert len(trade_inserts) == 1
     assert float(trade_inserts[0][4]) == 150.0
+
+
+def test_format_report_message_renders_portfolio_positions():
+    from notifier import format_report_message
+
+    sample_report = {
+        "macro": {"is_bull": True, "close": 520.0, "sma_200": 480.0},
+        "capital": {
+            "effective_capital": 10250.0,
+            "realized_pnl": 250.0,
+            "available_cash": 6000.0,
+            "open_positions": 1,
+            "max_positions": 3,
+        },
+        "portfolio": [
+            {
+                "symbol": "NVDA",
+                "decision": "TUT (TRAIL SL AKTIF)",
+                "close": 148.50,
+                "risk": {
+                    "pnl_pct": 12.50,
+                    "stop_loss": 139.00,
+                    "partial_tp": 152.00,
+                },
+            }
+        ],
+        "radar": [],
+        "warnings": ["Fiyat gecikmesi uyarisi"],
+    }
+
+    msg = format_report_message(sample_report)
+    assert "Pozisyon: 1/3" in msg
+    assert "NVDA: TUT (TRAIL SL AKTIF)" in msg
+    assert "$148.50" in msg
+    assert "+12.50%" in msg
+    assert "$139.00" in msg
+    assert "$152.00" in msg
+    assert "Fiyat gecikmesi uyarisi" in msg

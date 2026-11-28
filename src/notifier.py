@@ -8,19 +8,19 @@ log = get_logger("notifier")
 def format_report_message(report: dict) -> str:
     macro = report.get("macro", {})
     cap = report.get("capital", {})
-    held = report.get("held", [])
+    held = report.get("portfolio", [])
     radar = report.get("radar", [])
     warnings = report.get("warnings") or []
 
     macro_status = "BOGA (SMA200 Ustu)" if macro.get("is_bull") else "AYI (SMA200 Alti)"
     lines = [
-        "ALPHA ENGINE v4.9.16 RAPORU",
+        "ALPHA ENGINE v4.9.17 RAPORU",
         f"Makro Rejim [QQQ]: ${macro.get('close', 0.0):.2f} vs SMA-200 ${macro.get('sma_200', 0.0):.2f} -> {macro_status}",
         (
             f"Sermaye: Efektif ${cap.get('effective_capital', 0.0):,.2f} "
             f"(Realized: ${cap.get('realized_pnl', 0.0):+,.2f}) | "
             f"Serbest Nakit: ${cap.get('available_cash', 0.0):,.2f} | "
-            f"Pozisyon: {cap.get('open_positions_count', 0)}/{cap.get('max_positions', 3)}"
+            f"Pozisyon: {cap.get('open_positions', 0)}/{cap.get('max_positions', 3)}"
         ),
         "",
         "ACIK POZISYONLARIM:",
@@ -30,10 +30,11 @@ def format_report_message(report: dict) -> str:
         lines.append("- Acik pozisyon yok.")
     else:
         for item in held:
+            risk = item.get("risk") or {}
             lines.append(
                 f"- {item.get('symbol')}: {item.get('decision')} | "
-                f"Fiyat: ${item.get('price', 0.0):.2f} | PnL: {item.get('pnl_pct', 0.0):+.2f}% | "
-                f"SL: ${item.get('stop_loss', 0.0):.2f} | TP1: ${item.get('partial_tp', 0.0):.2f}"
+                f"Fiyat: ${item.get('close', 0.0):.2f} | PnL: {risk.get('pnl_pct', 0.0):+.2f}% | "
+                f"SL: ${risk.get('stop_loss', 0.0):.2f} | TP1: ${risk.get('partial_tp', 0.0):.2f}"
             )
 
     actionable = [r for r in radar if str(r.get("decision", "")).startswith(("AL", "GÜÇLÜ AL", "BEKLE (KİLİTLİ"))]
